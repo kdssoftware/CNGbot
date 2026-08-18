@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>CNG bot Dashboard - Discord-EVE Online bot</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col font-sans">
+	<nav class="bg-gray-800 border-b border-gray-700 px-4 md:px-8 py-4 flex justify-between items-center">
+		<div class="text-xl font-bold text-white flex items-center gap-3">CNGBot Control Panel</div>
+		<div class="flex items-center gap-4">
+			<a href="/auth/discord/login" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md transition duration-200 ease-in-out">Login with Discord</a>
+		</div>
+	</nav>
+	<div class="max-w-6xl w-full mx-auto px-4 md:px-6 py-8 flex-1">
+		<div class="text-center py-16 px-4">
+			<h1 class="text-4xl md:text-5xl font-bold mb-4 text-white">A Discord-EVE Online bot</h1>
+			<p class="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto mb-8">Automated EVE Mail forwarding, Corporation & Alliance role synchronizations, Standings management, and SeAT API integrations for your Discord server.</p>
+			<a href="/auth/discord/login" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-3 px-8 text-lg rounded-md transition duration-200 ease-in-out inline-block">Get Started with Discord</a>
+		</div>
+		<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+			<div class="bg-gray-800 border border-gray-700 rounded-lg p-6">
+				<h3 class="text-xl font-semibold mb-3 text-white">Real-time EVE Mail</h3>
+				<p class="text-gray-400">Automatically relays corp and alliance in-game mails straight to your Discord channels with mentions and chunking support.</p>
+			</div>
+			<div class="bg-gray-800 border border-gray-700 rounded-lg p-6">
+				<h3 class="text-xl font-semibold mb-3 text-white">Standings & Affiliations</h3>
+				<p class="text-gray-400">Sync members with in-game corporation, alliance, and standings contacts directly from your CEO or Director character.</p>
+			</div>
+		</div>
+	</div>
+	<footer class="text-center py-8 text-gray-500 text-sm border-t border-gray-800 mt-auto">
+		CNGBot &copy; KDS Software
+	</footer>
+</body>
+</html>
