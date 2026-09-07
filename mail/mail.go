@@ -15,6 +15,7 @@ import (
 	"evemaildiscord/config"
 	"evemaildiscord/db"
 	"evemaildiscord/esi"
+	"evemaildiscord/parser"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -177,6 +178,14 @@ func processGuildMail(dg *discordgo.Session, guildID, channelID string) {
 		_ = bodyResp.Body.Close()
 
 		cleanBody := CleanEveMailBody(mailBody.Body)
+		sentAt, err := time.Parse(time.RFC3339, mail.Timestamp)
+		if err != nil {
+			sentAt, err = time.Parse("2006-01-02T15:04:05Z", mail.Timestamp)
+			if err != nil {
+				sentAt = time.Now().UTC()
+			}
+		}
+		cleanBody = parser.InjectDiscordTimestamps(cleanBody, sentAt)
 		bodyRunes := []rune(cleanBody)
 
 		var discordID string
