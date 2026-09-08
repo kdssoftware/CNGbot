@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"regexp"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 
 	"evemaildiscord/config"
 	"evemaildiscord/db"
+	"evemaildiscord/donations"
 	"evemaildiscord/esi"
 	"evemaildiscord/roles"
 
@@ -433,6 +436,66 @@ var Commands = []*discordgo.ApplicationCommand{
 				Name:        "target",
 				Description: "The user, channel, role, emoji, or ID to look up",
 				Required:    true,
+			},
+		},
+	},
+	{
+		Name:        "set_donations_channel",
+		Description: "Sets or disables the channel for donation announcements",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionChannel,
+				Name:        "channel",
+				Description: "The channel to post in",
+				Required:    false,
+				ChannelTypes: []discordgo.ChannelType{
+					discordgo.ChannelTypeGuildText,
+					discordgo.ChannelTypeGuildNews,
+				},
+			},
+		},
+	},
+	{
+		Name:        "set_donations_track_corporation",
+		Description: "Toggles tracking for a specific corporation via its mapped Discord role",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionRole,
+				Name:        "role",
+				Description: "The role mapped to the EVE Corporation",
+				Required:    true,
+			},
+		},
+	},
+	{
+		Name:        "donations_leaderboard",
+		Description: "Displays the top 50 donors of all time to the tracked corporations",
+	},
+	{
+		Name:        "post_donations_leaderboard",
+		Description: "Posts the leaderboard to the configured donations channel",
+	},
+	{
+		Name:        "import_donations",
+		Description: "Import pasted corporation wallet journal data to backfill donation history",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionString,
+				Name:        "data",
+				Description: "Pasted text from EVE corporation wallet journal",
+				Required:    false,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionAttachment,
+				Name:        "file",
+				Description: "Text file (.txt) containing exported wallet journal",
+				Required:    false,
+			},
+			{
+				Type:        discordgo.ApplicationCommandOptionRole,
+				Name:        "role",
+				Description: "Target corporation role (optional if auto-detected)",
+				Required:    false,
 			},
 		},
 	},
@@ -1646,6 +1709,11 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			"`/map_standing_excellent [role]` - Set the role for Excellent standing (omit option to disable).\n" +
 			"`/set_events_channel [channel]` - Set the channel where newly created calendar events will be posted (omit option to disable).\n" +
 			"`/set_mail_channel [channel]` - Set the channel where EVE mails will be posted (omit option to disable).\n" +
+			"`/set_donations_channel [channel]` - Set or disable the channel for donation announcements.\n" +
+			"`/set_donations_track_corporation <role>` - Toggle tracking for a specific corporation via its mapped Discord role.\n" +
+			"`/donations_leaderboard` - Displays the top 50 donors of all time to the tracked corporations.\n" +
+			"`/post_donations_leaderboard` - Posts the leaderboard to the configured donations channel.\n" +
+			"`/import_donations [data] [file] [role]` - Import pasted corporation wallet journal data to backfill donation history.\n" +
 			"`/id <target>` - Output the Discord ID and mention format for a user, channel, role, or emoji.\n\n" +
 			"__Debug__\n" +
 			"`/toggle_logs` - Toggle posting role addition/removal logs to the designated channel.\n" +
@@ -2307,6 +2375,153 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 
 		sendResponse(s, i.Interaction, fmt.Sprintf("%s\n```%s```", resolvedID, formatted))
+
+	case "set_donations_channel":
+		chOpt := getOption(data.Options, "channel")
+		if chOpt == nil {
+			err := db.SetGuildDonationChannel(guildID, nil)
+			if err != nil {
+				sendResponse(s, i.Interaction, fmt.Sprintf("Error disabling donations channel: %v", err))
+				return
+			}
+			sendResponse(s, i.Interaction, "Donations channel disabled.")
+			return
+		}
+		ch := chOpt.ChannelValue(s)
+		if ch == nil {
+			sendResponse(s, i.Interaction, "Invalid channel specified.")
+			return
+		}
+		chID := ch.ID
+		err := db.SetGuildDonationChannel(guildID, &chID)
+		if err != nil {
+			sendResponse(s, i.Interaction, fmt.Sprintf("Error saving donations channel: %v", err))
+			return
+		}
+		sendResponse(s, i.Interaction, fmt.Sprintf("Donations channel set to <#%s>.", chID))
+
+	case "set_donations_track_corporation":
+		roleOpt := getOption(data.Options, "role")
+		if roleOpt == nil {
+			sendResponse(s, i.Interaction, "Role is required.")
+			return
+		}
+		role := roleOpt.RoleValue(s, guildID)
+		if role == nil {
+			sendResponse(s, i.Interaction, "Invalid role specified.")
+			return
+		}
+		roleID := role.ID
+
+		var eveCorpID int
+		err := db.DB.QueryRow("SELECT corp_id FROM corp_to_role WHERE guild_id = ? AND role_id = ?", guildID, roleID).Scan(&eveCorpID)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				sendResponse(s, i.Interaction, fmt.Sprintf("Role <@&%s> is not mapped to an EVE Corporation. Please map it first using `/map_corp` or `/map_corp_id`.", roleID))
+				return
+			}
+			sendResponse(s, i.Interaction, fmt.Sprintf("Database error: %v", err))
+			return
+		}
+
+		tc, err := db.GetTrackedCorporation(guildID, roleID)
+		if err != nil {
+			sendResponse(s, i.Interaction, fmt.Sprintf("Database error: %v", err))
+			return
+		}
+
+		corpDisplayName := donations.GetTrackedCorpDisplayName(guildID, roleID, eveCorpID, s)
+		if tc != nil {
+			_, err = db.RemoveTrackedCorporation(guildID, roleID)
+			if err != nil {
+				sendResponse(s, i.Interaction, fmt.Sprintf("Error removing tracked corporation: %v", err))
+				return
+			}
+			sendResponse(s, i.Interaction, fmt.Sprintf("Stopped tracking donations for %s (role <@&%s>).", corpDisplayName, roleID))
+		} else {
+			err = db.AddTrackedCorporation(guildID, roleID, eveCorpID)
+			if err != nil {
+				sendResponse(s, i.Interaction, fmt.Sprintf("Error adding tracked corporation: %v", err))
+				return
+			}
+			go donations.CheckDonations(s)
+			sendResponse(s, i.Interaction, fmt.Sprintf("Started tracking donations for %s (role <@&%s>). Polling past and new donations...", corpDisplayName, roleID))
+		}
+
+	case "donations_leaderboard":
+		leaderboardText, err := donations.BuildLeaderboard(guildID, s)
+		if err != nil {
+			sendResponse(s, i.Interaction, fmt.Sprintf("Error generating donations leaderboard: %v", err))
+			return
+		}
+		sendResponse(s, i.Interaction, leaderboardText)
+
+	case "post_donations_leaderboard":
+		settings, err := db.GetGuildDonationSettings(guildID)
+		if err != nil || settings == nil || settings.ChannelID == nil || *settings.ChannelID == "" {
+			sendResponse(s, i.Interaction, "Donations channel is not configured. Use `/set_donations_channel` to configure it first.")
+			return
+		}
+		leaderboardText, err := donations.BuildLeaderboard(guildID, s)
+		if err != nil {
+			sendResponse(s, i.Interaction, fmt.Sprintf("Error generating donations leaderboard: %v", err))
+			return
+		}
+		chunks := splitMessage(leaderboardText, 2000)
+		for _, chunk := range chunks {
+			_, err = s.ChannelMessageSend(*settings.ChannelID, chunk)
+			if err != nil {
+				sendResponse(s, i.Interaction, fmt.Sprintf("Error posting leaderboard to channel: %v", err))
+				return
+			}
+		}
+		sendResponse(s, i.Interaction, fmt.Sprintf("Leaderboard posted to <#%s>.", *settings.ChannelID))
+
+	case "import_donations":
+		dataOpt := getOption(data.Options, "data")
+		fileOpt := getOption(data.Options, "file")
+		roleOpt := getOption(data.Options, "role")
+
+		var rawText string
+		if dataOpt != nil {
+			rawText = dataOpt.StringValue()
+		}
+
+		if strings.TrimSpace(rawText) == "" && fileOpt != nil {
+			attID, ok := fileOpt.Value.(string)
+			if ok && data.Resolved != nil && data.Resolved.Attachments != nil {
+				if att, exists := data.Resolved.Attachments[attID]; exists && att != nil && att.URL != "" {
+					resp, err := http.Get(att.URL)
+					if err == nil && resp != nil {
+						body, _ := io.ReadAll(resp.Body)
+						_ = resp.Body.Close()
+						rawText = string(body)
+					}
+				}
+			}
+		}
+
+		if strings.TrimSpace(rawText) == "" {
+			sendResponse(s, i.Interaction, "You must provide pasted wallet journal text via the `data` option or upload a text file via the `file` option.")
+			return
+		}
+
+		var targetCorpID int
+		if roleOpt != nil {
+			role := roleOpt.RoleValue(s, guildID)
+			if role != nil {
+				_ = db.DB.QueryRow("SELECT corp_id FROM corp_to_role WHERE guild_id = ? AND role_id = ?", guildID, role.ID).Scan(&targetCorpID)
+			}
+		}
+
+		imported, dups, corpName, err := donations.ImportWalletJournal(guildID, targetCorpID, rawText)
+		if err != nil {
+			sendResponse(s, i.Interaction, fmt.Sprintf("Error importing donations: %v", err))
+			return
+		}
+
+		msg := fmt.Sprintf("Successfully imported %d new donations (%d duplicates skipped) for corporation %s.", imported, dups, corpName)
+		sendResponse(s, i.Interaction, donations.SanitizeText(msg))
 	}
 }
 

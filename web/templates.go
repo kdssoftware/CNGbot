@@ -27,11 +27,18 @@ type DashboardData struct {
 	BotInviteURL string
 }
 
+type TrackedCorpView struct {
+	RoleID    string
+	EveCorpID int
+	CorpName  string
+}
+
 type GuildConfigData struct {
 	User             *UserSession
 	Guild            DiscordGuildInfo
 	Integration      any
 	EveCharacterName string
+	TrackedCorps     []TrackedCorpView
 	Config           struct {
 		MailChannel   string
 		LogChannel    string

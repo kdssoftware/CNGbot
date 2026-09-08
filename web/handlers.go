@@ -14,6 +14,7 @@ import (
 
 	"evemaildiscord/config"
 	"evemaildiscord/db"
+	"evemaildiscord/donations"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -296,6 +297,18 @@ func (h *WebHandler) HandleGuildConfig(w http.ResponseWriter, r *http.Request) {
 		_ = db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'sync_roles'", guildID).Scan(&confData.SyncRoles)
 	}
 
+	var trackedCorps []TrackedCorpView
+	if tcs, err := db.GetTrackedCorporationsForGuild(guildID); err == nil {
+		for _, tc := range tcs {
+			name := donations.GetTrackedCorpDisplayName(guildID, tc.RoleID, tc.EveCorpID, h.dg)
+			trackedCorps = append(trackedCorps, TrackedCorpView{
+				RoleID:    tc.RoleID,
+				EveCorpID: tc.EveCorpID,
+				CorpName:  name,
+			})
+		}
+	}
+
 	successCode := r.URL.Query().Get("success")
 	errorCode := r.URL.Query().Get("error")
 
@@ -304,6 +317,7 @@ func (h *WebHandler) HandleGuildConfig(w http.ResponseWriter, r *http.Request) {
 		Guild:            guildInfo,
 		Integration:      integ,
 		EveCharacterName: eveCharName,
+		TrackedCorps:     trackedCorps,
 		Config:           confData,
 		Success:          successCode,
 		Error:            errorCode,
@@ -349,6 +363,7 @@ func (h *WebHandler) HandleEveLogin(w http.ResponseWriter, r *http.Request) {
 		"esi-alliances.read_contacts.v1",
 		"esi-corporations.read_contacts.v1",
 		"esi-corporations.read_standings.v1",
+		"esi-wallet.read_corporation_wallets.v1",
 		"publicData",
 	}
 
@@ -649,4 +664,66 @@ func fetchCharacterName(charID int) string {
 	}
 
 	return data.Name
+}
+
+func (h *WebHandler) HandleGuildDonationsImport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	session := Store.GetSession(r)
+	if session == nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	_ = r.ParseMultipartForm(10 << 20) // 10MB max
+	guildID := r.FormValue("guild_id")
+	if guildID == "" {
+		http.Redirect(w, r, "/dashboard", http.StatusSeeOther)
+		return
+	}
+
+	if _, ok := session.AdminGuilds[guildID]; !ok {
+		http.Error(w, "You do not have Administrator permissions for this server", http.StatusForbidden)
+		return
+	}
+
+	corpIDStr := r.FormValue("corp_id")
+	corpID, _ := strconv.Atoi(corpIDStr)
+
+	rawText := r.FormValue("wallet_text")
+
+	file, _, err := r.FormFile("wallet_file")
+	if err == nil && file != nil {
+		defer file.Close()
+		content, errRead := io.ReadAll(file)
+		if errRead == nil && len(content) > 0 {
+			if strings.TrimSpace(rawText) != "" {
+				rawText += "\n" + string(content)
+			} else {
+				rawText = string(content)
+			}
+		}
+	}
+
+	if strings.TrimSpace(rawText) == "" {
+		http.Redirect(w, r, "/dashboard/guild?id="+guildID+"&error=Please+paste+wallet+journal+text+or+select+a+file", http.StatusSeeOther)
+		return
+	}
+
+	imported, dups, corpName, err := donations.ImportWalletJournal(guildID, corpID, rawText)
+	if err != nil {
+		msg := url.QueryEscape(err.Error())
+		http.Redirect(w, r, "/dashboard/guild?id="+guildID+"&error="+msg, http.StatusSeeOther)
+		return
+	}
+
+	if h.dg != nil {
+		db.DiscordLog(h.dg, guildID, fmt.Sprintf("Imported %d donations (%d duplicates skipped) for %s via web dashboard by <@%s>.", imported, dups, corpName, session.UserID))
+	}
+
+	redirectURL := fmt.Sprintf("/dashboard/guild?id=%s&success=donations_imported&imported=%d&dups=%d", guildID, imported, dups)
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
 }

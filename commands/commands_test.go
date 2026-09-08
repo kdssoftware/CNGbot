@@ -43,8 +43,13 @@ func TestApplicationCommandsDefinitions(t *testing.T) {
 		"map_standing_neutral":   true,
 		"map_standing_good":      true,
 		"map_standing_excellent": true,
-		"char_info":              true,
-		"id":                     true,
+		"char_info":                       true,
+		"id":                              true,
+		"set_donations_channel":           true,
+		"set_donations_track_corporation": true,
+		"donations_leaderboard":           true,
+		"post_donations_leaderboard":      true,
+		"import_donations":                true,
 	}
 
 	if len(Commands) != len(expectedCommands) {
@@ -218,5 +223,52 @@ func TestResolveDiscordID(t *testing.T) {
 				t.Errorf("expected formatted %q, got %q", tt.expectedFmt, formatted)
 			}
 		})
+	}
+}
+
+func TestDonationCommandsOptions(t *testing.T) {
+	cmdMap := make(map[string]*discordgo.ApplicationCommand)
+	for _, cmd := range Commands {
+		cmdMap[cmd.Name] = cmd
+	}
+
+	setChanCmd := cmdMap["set_donations_channel"]
+	if setChanCmd == nil {
+		t.Fatal("missing set_donations_channel command")
+	}
+	if len(setChanCmd.Options) != 1 || setChanCmd.Options[0].Name != "channel" || setChanCmd.Options[0].Required {
+		t.Errorf("invalid set_donations_channel options: %+v", setChanCmd.Options)
+	}
+
+	setTrackCmd := cmdMap["set_donations_track_corporation"]
+	if setTrackCmd == nil {
+		t.Fatal("missing set_donations_track_corporation command")
+	}
+	if len(setTrackCmd.Options) != 1 || setTrackCmd.Options[0].Name != "role" || !setTrackCmd.Options[0].Required {
+		t.Errorf("invalid set_donations_track_corporation options: %+v", setTrackCmd.Options)
+	}
+
+	lbCmd := cmdMap["donations_leaderboard"]
+	if lbCmd == nil {
+		t.Fatal("missing donations_leaderboard command")
+	}
+	if len(lbCmd.Options) != 0 {
+		t.Errorf("expected no options for donations_leaderboard, got %d", len(lbCmd.Options))
+	}
+
+	postLbCmd := cmdMap["post_donations_leaderboard"]
+	if postLbCmd == nil {
+		t.Fatal("missing post_donations_leaderboard command")
+	}
+	if len(postLbCmd.Options) != 0 {
+		t.Errorf("expected no options for post_donations_leaderboard, got %d", len(postLbCmd.Options))
+	}
+
+	importCmd := cmdMap["import_donations"]
+	if importCmd == nil {
+		t.Fatal("missing import_donations command")
+	}
+	if len(importCmd.Options) != 3 {
+		t.Errorf("expected 3 options for import_donations, got %d", len(importCmd.Options))
 	}
 }

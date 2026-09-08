@@ -60,9 +60,53 @@ func createOrMigrateTables(database *sql.DB) error {
 			guild_id TEXT PRIMARY KEY,
 			last_mail_id INTEGER NOT NULL DEFAULT 0
 		);
+		CREATE TABLE IF NOT EXISTS GuildDonationSettings (
+			guild_id TEXT PRIMARY KEY,
+			channel_id TEXT
+		);
+		CREATE TABLE IF NOT EXISTS TrackedCorporations (
+			guild_id TEXT NOT NULL,
+			role_id TEXT NOT NULL,
+			eve_corp_id INTEGER NOT NULL,
+			PRIMARY KEY (guild_id, role_id)
+		);
+		CREATE INDEX IF NOT EXISTS idx_tracked_corps_guild ON TrackedCorporations(guild_id);
+		CREATE INDEX IF NOT EXISTS idx_tracked_corps_corp ON TrackedCorporations(eve_corp_id);
+		CREATE TABLE IF NOT EXISTS DonationRecord (
+			transaction_id INTEGER PRIMARY KEY,
+			receiver_corp_id INTEGER NOT NULL,
+			donor_id INTEGER NOT NULL,
+			donor_type TEXT NOT NULL,
+			amount REAL NOT NULL,
+			balance REAL NOT NULL DEFAULT 0,
+			date DATETIME NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_donation_record_receiver ON DonationRecord(receiver_corp_id);
+		CREATE INDEX IF NOT EXISTS idx_donation_record_donor ON DonationRecord(donor_id);
 	`)
 	if err != nil {
 		return fmt.Errorf("error creating base tables: %w", err)
+	}
+
+	// Ensure balance column exists on DonationRecord
+	var hasBalance bool
+	colRows, err := database.Query("PRAGMA table_info(DonationRecord)")
+	if err == nil {
+		for colRows.Next() {
+			var cid int
+			var name, colType string
+			var notNull, pk int
+			var dfltValue *string
+			if colRows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk) == nil {
+				if strings.EqualFold(name, "balance") {
+					hasBalance = true
+				}
+			}
+		}
+		_ = colRows.Close()
+		if !hasBalance {
+			_, _ = database.Exec("ALTER TABLE DonationRecord ADD COLUMN balance REAL NOT NULL DEFAULT 0;")
+		}
 	}
 
 	// 2. Define all guild-scoped tables
@@ -480,5 +524,270 @@ func SetMailState(guildID string, lastMailID int) error {
 			last_mail_id = excluded.last_mail_id
 	`, guildID, lastMailID)
 	return err
+}
+
+type GuildDonationSettings struct {
+	GuildID   string  `json:"guild_id"`
+	ChannelID *string `json:"channel_id"`
+}
+
+func GetGuildDonationSettings(guildID string) (*GuildDonationSettings, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	var s GuildDonationSettings
+	s.GuildID = guildID
+	var ch sql.NullString
+	err := DB.QueryRow("SELECT channel_id FROM GuildDonationSettings WHERE guild_id = ?", guildID).Scan(&ch)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if ch.Valid && ch.String != "" {
+		s.ChannelID = &ch.String
+	}
+	return &s, nil
+}
+
+func SetGuildDonationChannel(guildID string, channelID *string) error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+	if channelID == nil || *channelID == "" {
+		_, err := DB.Exec("DELETE FROM GuildDonationSettings WHERE guild_id = ?", guildID)
+		return err
+	}
+	_, err := DB.Exec(`
+		INSERT INTO GuildDonationSettings (guild_id, channel_id)
+		VALUES (?, ?)
+		ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id
+	`, guildID, *channelID)
+	return err
+}
+
+type TrackedCorporation struct {
+	GuildID   string `json:"guild_id"`
+	RoleID    string `json:"role_id"`
+	EveCorpID int    `json:"eve_corp_id"`
+}
+
+func GetTrackedCorporation(guildID, roleID string) (*TrackedCorporation, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	var tc TrackedCorporation
+	tc.GuildID = guildID
+	tc.RoleID = roleID
+	err := DB.QueryRow("SELECT eve_corp_id FROM TrackedCorporations WHERE guild_id = ? AND role_id = ?", guildID, roleID).Scan(&tc.EveCorpID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &tc, nil
+}
+
+func AddTrackedCorporation(guildID, roleID string, eveCorpID int) error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+	_, err := DB.Exec(`
+		INSERT INTO TrackedCorporations (guild_id, role_id, eve_corp_id)
+		VALUES (?, ?, ?)
+		ON CONFLICT(guild_id, role_id) DO UPDATE SET eve_corp_id = excluded.eve_corp_id
+	`, guildID, roleID, eveCorpID)
+	return err
+}
+
+func RemoveTrackedCorporation(guildID, roleID string) (bool, error) {
+	if DB == nil {
+		return false, fmt.Errorf("database not initialized")
+	}
+	res, err := DB.Exec("DELETE FROM TrackedCorporations WHERE guild_id = ? AND role_id = ?", guildID, roleID)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	return rowsAffected > 0, nil
+}
+
+func GetTrackedCorporationsForGuild(guildID string) ([]TrackedCorporation, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	rows, err := DB.Query("SELECT role_id, eve_corp_id FROM TrackedCorporations WHERE guild_id = ?", guildID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []TrackedCorporation
+	for rows.Next() {
+		var tc TrackedCorporation
+		tc.GuildID = guildID
+		if err := rows.Scan(&tc.RoleID, &tc.EveCorpID); err == nil {
+			results = append(results, tc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func GetAllUniqueTrackedCorpIDs() ([]int, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	rows, err := DB.Query("SELECT DISTINCT eve_corp_id FROM TrackedCorporations")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var corps []int
+	for rows.Next() {
+		var cid int
+		if err := rows.Scan(&cid); err == nil {
+			corps = append(corps, cid)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return corps, nil
+}
+
+func GetGuildsTrackingCorp(eveCorpID int) ([]string, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	rows, err := DB.Query("SELECT DISTINCT guild_id FROM TrackedCorporations WHERE eve_corp_id = ?", eveCorpID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var guilds []string
+	for rows.Next() {
+		var gid string
+		if err := rows.Scan(&gid); err == nil {
+			guilds = append(guilds, gid)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return guilds, nil
+}
+
+type DonationRecord struct {
+	TransactionID  int64     `json:"transaction_id"`
+	ReceiverCorpID int       `json:"receiver_corp_id"`
+	DonorID        int       `json:"donor_id"`
+	DonorType      string    `json:"donor_type"`
+	Amount         float64   `json:"amount"`
+	Balance        float64   `json:"balance"`
+	Date           time.Time `json:"date"`
+}
+
+type DonorLeaderboardEntry struct {
+	DonorID       int     `json:"donor_id"`
+	DonorType     string  `json:"donor_type"`
+	TotalAmount   float64 `json:"total_amount"`
+	DonationCount int     `json:"donation_count"`
+}
+
+func DonationRecordExists(transactionID int64) (bool, error) {
+	if DB == nil {
+		return false, fmt.Errorf("database not initialized")
+	}
+	var count int
+	err := DB.QueryRow("SELECT COUNT(*) FROM DonationRecord WHERE transaction_id = ?", transactionID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func DonationExists(receiverCorpID, donorID int, amount, balance float64, t time.Time) (bool, error) {
+	if DB == nil {
+		return false, fmt.Errorf("database not initialized")
+	}
+	start := t.Add(-90 * time.Second)
+	end := t.Add(90 * time.Second)
+
+	var count int
+	var err error
+	if balance > 0 {
+		err = DB.QueryRow(`
+			SELECT COUNT(*) FROM DonationRecord
+			WHERE receiver_corp_id = ? AND donor_id = ? AND ABS(amount - ?) < 0.01
+			AND (
+				(balance > 0 AND ABS(balance - ?) < 0.01)
+				OR (balance == 0 AND date >= ? AND date <= ?)
+			)
+		`, receiverCorpID, donorID, amount, balance, start, end).Scan(&count)
+	} else {
+		err = DB.QueryRow(`
+			SELECT COUNT(*) FROM DonationRecord
+			WHERE receiver_corp_id = ? AND donor_id = ? AND ABS(amount - ?) < 0.01
+			AND (date >= ? AND date <= ?)
+		`, receiverCorpID, donorID, amount, start, end).Scan(&count)
+	}
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func InsertDonationRecord(rec DonationRecord) error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+	_, err := DB.Exec(`
+		INSERT INTO DonationRecord (transaction_id, receiver_corp_id, donor_id, donor_type, amount, balance, date)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(transaction_id) DO NOTHING
+	`, rec.TransactionID, rec.ReceiverCorpID, rec.DonorID, rec.DonorType, rec.Amount, rec.Balance, rec.Date)
+	return err
+}
+
+func GetDonationsLeaderboard(guildID string, limit int) ([]DonorLeaderboardEntry, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := DB.Query(`
+		SELECT d.donor_id, d.donor_type, SUM(d.amount) AS total_amount, COUNT(*) AS donation_count
+		FROM DonationRecord d
+		WHERE d.receiver_corp_id IN (
+			SELECT eve_corp_id FROM TrackedCorporations WHERE guild_id = ?
+		)
+		GROUP BY d.donor_id, d.donor_type
+		ORDER BY total_amount DESC
+		LIMIT ?
+	`, guildID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var entries []DonorLeaderboardEntry
+	for rows.Next() {
+		var entry DonorLeaderboardEntry
+		if err := rows.Scan(&entry.DonorID, &entry.DonorType, &entry.TotalAmount, &entry.DonationCount); err == nil {
+			entries = append(entries, entry)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 

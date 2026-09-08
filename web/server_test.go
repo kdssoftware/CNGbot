@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -37,6 +38,21 @@ func setupTestDB(t *testing.T) {
 			key TEXT NOT NULL,
 			value TEXT NOT NULL,
 			PRIMARY KEY (guild_id, key)
+		);
+		CREATE TABLE IF NOT EXISTS TrackedCorporations (
+			guild_id TEXT NOT NULL,
+			role_id TEXT NOT NULL,
+			eve_corp_id INTEGER NOT NULL,
+			PRIMARY KEY (guild_id, role_id)
+		);
+		CREATE TABLE IF NOT EXISTS DonationRecord (
+			transaction_id INTEGER PRIMARY KEY,
+			receiver_corp_id INTEGER NOT NULL,
+			donor_id INTEGER NOT NULL,
+			donor_type TEXT NOT NULL,
+			amount REAL NOT NULL,
+			balance REAL NOT NULL DEFAULT 0,
+			date DATETIME NOT NULL
 		);
 	`)
 	if err != nil {
@@ -281,5 +297,50 @@ func TestHandleLogout(t *testing.T) {
 	// Session should be deleted
 	if Store.GetSession(req) != nil {
 		t.Errorf("expected session to be deleted from store")
+	}
+}
+
+func TestHandleGuildDonationsImport(t *testing.T) {
+	setupTestDB(t)
+
+	guildID := "guild_100"
+	corpID := 98765432
+	_ = db.AddTrackedCorporation(guildID, "role_cult", corpID)
+
+	adminGuilds := map[string]DiscordGuildInfo{
+		guildID: {
+			ID:       guildID,
+			Name:     "Alpha Server",
+			HasAdmin: true,
+		},
+	}
+
+	session, err := Store.CreateSession("user123", "TestUser", "avatar1", "tok", adminGuilds)
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	handler := NewWebHandler(nil)
+
+	pastedText := "2026.09.05 20:05\tPlayer Donation\t500.000.000 ISK\t7.782.693.407 ISK\tAmayah Thara deposited cash into Cult of Magik's account"
+	form := url.Values{
+		"guild_id":    {guildID},
+		"corp_id":     {strconv.Itoa(corpID)},
+		"wallet_text": {pastedText},
+	}
+
+	req := httptest.NewRequest("POST", "/dashboard/guild/donations/import", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: session.ID})
+	w := httptest.NewRecorder()
+
+	handler.HandleGuildDonationsImport(w, req)
+
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect on donations import, got %d", w.Code)
+	}
+	loc := w.Header().Get("Location")
+	if !strings.Contains(loc, "success=donations_imported") || !strings.Contains(loc, "imported=1") {
+		t.Errorf("unexpected location: %s", loc)
 	}
 }

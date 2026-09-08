@@ -27,6 +27,11 @@ Here is a full list of all available commands for the CNG Bot and what they do.
 * `/set_log_channel`: Set the channel where logs should be posted.
 * `/set_events_channel`: Set or disable the channel where newly created calendar events will be posted.
 * `/set_mail_channel`: Set or disable the channel where EVE mails will be posted.
+* `/set_donations_channel`: Set or disable the channel for donation announcements.
+* `/set_donations_track_corporation`: Toggle tracking for an EVE Corporation via its mapped Discord role.
+* `/donations_leaderboard`: Display the top 50 donors of all time to the tracked corporations.
+* `/post_donations_leaderboard`: Post the leaderboard to the configured donations channel.
+* `/import_donations`: Import pasted corporation wallet journal data to backfill donation history.
 * `/toggle_logs`: Toggle posting role addition and removal logs to the designated channel.
 * `/toggle_automap`: Toggle automatic character mapping of new server members on join.
 * `/set_greeting`: Configure automatic greeting message for new members on join.

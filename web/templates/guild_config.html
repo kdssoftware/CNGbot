@@ -44,6 +44,8 @@
 			<div class="bg-green-900/30 text-green-400 border border-green-800/50 p-4 rounded-md mb-6 font-medium">✓ EVE Online integration has been unlinked from this server.</div>
 		{{else if eq .Success "seat_saved"}}
 			<div class="bg-green-900/30 text-green-400 border border-green-800/50 p-4 rounded-md mb-6 font-medium">✓ SeAT API configuration saved successfully!</div>
+		{{else if eq .Success "donations_imported"}}
+			<div class="bg-green-900/30 text-green-400 border border-green-800/50 p-4 rounded-md mb-6 font-medium">✓ Historical donations imported successfully! Duplicate entries were safely detected and skipped. Use /donations_leaderboard in Discord to view updated standings.</div>
 		{{else if eq .Success "1"}}
 			<div class="bg-green-900/30 text-green-400 border border-green-800/50 p-4 rounded-md mb-6 font-medium">✓ Settings saved successfully!</div>
 		{{end}}
@@ -204,6 +206,35 @@
 					</tbody>
 				</table>
 			</div>
+		</div>
+
+		<!-- 5. Corporation Wallet Donations Import -->
+		<div class="bg-gray-800 border border-gray-700 rounded-lg p-5 md:p-6 mb-6 shadow-md">
+			<h2 class="text-xl font-bold text-white mb-2">5. Corporation Wallet Donations Import</h2>
+			<p class="text-gray-400 text-sm mb-4">
+				Paste your corporation wallet journal filtered on <strong>Player Donation</strong> (from the in-game Corporation Wallet &rarr; Journal tab) or upload a <code>.txt</code> file to backfill historical donations. You can paste multiple times (e.g. for individual past months or the last 30 days); duplicate donations are automatically detected and skipped.
+			</p>
+			<form action="/dashboard/guild/donations/import" method="POST" enctype="multipart/form-data" class="space-y-4">
+				<input type="hidden" name="guild_id" value="{{.Guild.ID}}">
+				<div>
+					<label class="block text-sm font-medium text-gray-300 mb-1">Target Corporation</label>
+					<select name="corp_id" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white">
+						<option value="0">Auto-detect from pasted text / tracked corporation</option>
+						{{range .TrackedCorps}}
+							<option value="{{.EveCorpID}}">{{.CorpName}} (Role ID: {{.RoleID}})</option>
+						{{end}}
+					</select>
+				</div>
+				<div>
+					<label class="block text-sm font-medium text-gray-300 mb-1">Paste Wallet Journal (filtered on Player Donation)</label>
+					<textarea name="wallet_text" rows="6" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white font-mono text-sm placeholder-gray-500" placeholder="2026.09.05 20:05	Player Donation	500.000.000 ISK	7.782.693.407 ISK	Amayah Thara deposited cash into Cult of Magik's account..."></textarea>
+				</div>
+				<div>
+					<label class="block text-sm font-medium text-gray-300 mb-1">Or Upload Text File (.txt)</label>
+					<input type="file" name="wallet_file" accept=".txt" class="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-gray-700 file:text-white hover:file:bg-gray-600">
+				</div>
+				<button type="submit" class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-md transition duration-200">Import Donations</button>
+			</form>
 		</div>
 	</div>
 

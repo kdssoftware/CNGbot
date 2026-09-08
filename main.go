@@ -9,6 +9,7 @@ import (
 	"evemaildiscord/commands"
 	"evemaildiscord/config"
 	"evemaildiscord/db"
+	"evemaildiscord/donations"
 	"evemaildiscord/mail"
 	"evemaildiscord/roles"
 	"evemaildiscord/web"
@@ -68,6 +69,7 @@ func main() {
 	}()
 
 	go mail.PollEveMail(dg)
+	go donations.PollDonations(dg)
 
 	go roles.PollRoles(dg)
 	go roles.PollGuestRoles(dg)
