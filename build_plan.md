@@ -1,112 +1,237 @@
-# Build Plan: EVE Online Donations Tracking & Leaderboard
+# Missing Seat Role Implementation Plan
 
-## 1. Overview
-This document outlines the implementation plan for a new Discord bot feature that tracks EVE Online corporate donations, posts real-time thank-you messages, and provides a leaderboard of top donors. The feature maps EVE characters to Discord users and EVE corporations to Discord roles where possible.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-## 2. Database Schema Updates
-To support this feature, the database needs to store configuration and track donations to avoid duplicate announcements.
+**Goal:** Create a `/set_missing_seat_role` command and logic to automatically assign a missing seat role and send a greeting message to users missing a required SeAT login, removing the role once they comply.
 
-### New Tables / Models:
-1.  **GuildDonationSettings**
-    *   `guild_id` (Primary Key)
-    *   `channel_id` (Nullable): The channel where announcements and leaderboards are posted. If null, the feature is disabled for the guild.
-2.  **TrackedCorporations**
-    *   `guild_id` (Foreign Key)
-    *   `role_id`: The Discord role ID mapped to the EVE Corporation.
-    *   `eve_corp_id`: The corresponding EVE Corporation ID.
-3.  **DonationRecord**
-    *   `transaction_id` (Primary Key, from ESI): Unique ID of the wallet journal entry.
-    *   `receiver_corp_id` (Index): The tracked corporation that received the ISK.
-    *   `donor_id` (Index): The EVE character or corporation ID that donated.
-    *   `donor_type`: 'character' or 'corporation'.
-    *   `amount`: Total ISK donated in this transaction.
-    *   `date`: Timestamp of the donation.
+**Architecture:** We will store the `missing_seat_role` ID in the `config` table similar to `greeting_channel`. In the roles synchronization loops (`roles.go` and `guest_roles.go`), we will track if any mapped corp/alliance role was denied because of `!isSeatActive`. If denied, we assign the `missing_seat_role` (if not already present) and send a targeted message in the greeting channel. If they have the role but no longer need it (because they met requirements or were removed), we remove it.
 
-## 3. Discord Slash Commands
-Implement the following slash commands using the framework's command registration.
+**Tech Stack:** Go, DiscordGo, SQLite.
 
-### 3.1 `/set_donations_channel`
-*   **Description**: Sets or disables the channel for donation announcements.
-*   **Arguments**:
-    *   `channel` (Optional, Channel Type): The channel to post in.
-*   **Logic**:
-    *   If `channel` is provided: Upsert `GuildDonationSettings` with the `channel_id`.
-    *   If `channel` is omitted: Set `channel_id` to null or delete the `GuildDonationSettings` record to turn off the feature.
-*   **Response**: Confirm the new setting to the user.
+---
 
-### 3.2 `/set_donations_track_corporation`
-*   **Description**: Toggles tracking for a specific corporation via its mapped Discord role.
-*   **Arguments**:
-    *   `role` (Required, Role Type): The role mapped to the EVE Corporation.
-*   **Logic**:
-    *   Look up the `eve_corp_id` associated with the given Discord `role`.
-    *   If a record exists in `TrackedCorporations` for this guild and role, remove it (stop tracking).
-    *   If it does not exist, add it (start tracking).
-*   **Response**: Confirm whether the corporation was added or removed from tracking.
+### Task 1: Create the `/set_missing_seat_role` Command
 
-### 3.3 `/donations_leaderboard`
-*   **Description**: Displays the top 50 donors of all time to the tracked corporations.
-*   **Arguments**: None.
-*   **Logic**:
-    *   Aggregate total ISK and count of donations from `DonationRecord` for all `receiver_corp_id`s tracked by the guild.
-    *   Sort descending by total ISK.
-    *   Limit to top 50.
-    *   Format the output according to the Formatting Rules below.
-*   **Response**: Send the formatted leaderboard as a message (or embed).
+**Files:**
+- Modify: `commands/commands.go`
+- Modify: `commands/commands_test.go`
 
-### 3.4 `/post_donations_leaderboard`
-*   **Description**: Posts the leaderboard to the configured donations channel.
-*   **Arguments**: None.
-*   **Logic**:
-    *   Fetch `channel_id` from `GuildDonationSettings`.
-    *   If not set, return an error message to the user.
-    *   Generate the leaderboard exactly as in `/donations_leaderboard`.
-    *   Send the generated leaderboard to the configured `channel_id`.
-*   **Response**: Ephemeral confirmation to the user that the leaderboard was posted.
+**Interfaces:**
+- Consumes: The `db.DB` connection for writing to `config` table.
+- Produces: Updates `config` table with `key = 'missing_seat_role'`.
 
-## 4. Background Task (ESI Polling)
-*   **Loop**: Run a background task periodically (e.g., every 15-30 minutes, respecting ESI caching limits).
-*   **Action**:
-    *   Iterate through all unique `eve_corp_id`s in `TrackedCorporations`.
-    *   Fetch the corporation wallet journal from ESI: `GET /corporations/{corporation_id}/wallets/{division}/journal/`. (Note: Requires valid ESI tokens with `esi-wallet.read_corporation_wallets.v1` scope for a director of the corp).
-    *   Filter for `ref_type` corresponding to player donations (typically `player_donation` or similar).
-    *   For each record, check if `transaction_id` already exists in `DonationRecord`.
-    *   If it's new:
-        1.  Insert into `DonationRecord`.
-        2.  Fetch `GuildDonationSettings` for guilds tracking this corp.
-        3.  Construct a thank-you message (see Formatting Rules).
-        4.  Post the message to the configured `channel_id`.
+- [x] **Step 1: Add command definition**
+In `commands/commands.go`, add the slash command to the `Commands` array:
 
-## 5. Formatting Rules (CRITICAL)
-The LLM must strictly adhere to these formatting rules for all outputs (Leaderboards and Announcements).
+```go
+		{
+			Name:        "set_missing_seat_role",
+			Description: "Set a role to assign to users who need to log into SeAT but haven't (omit to disable)",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionRole,
+					Name:        "role",
+					Description: "The Discord role to assign (omit to disable)",
+					Required:    false,
+				},
+			},
+		},
+```
 
-### Constraints:
-*   **NO EMOJIS**.
-*   **NO DASHES** (`-`). Use alternative separators like bullet points (`*`), commas, or periods if necessary.
-*   **Clean aesthetic**: The leaderboard must be a good-looking, structured text block (using Markdown code blocks or structured embeds if applicable, but avoiding messy characters).
+- [x] **Step 2: Add help text**
+In `commands/commands.go`'s `helpCommandHandler`, add to the help string:
+```go
+"\\n`/set_missing_seat_role [role]` - Set a role to assign to users who need to log into SeAT but haven't (omit to disable).\\n"
+```
 
-### Entity Resolution & Display Logic:
-For every donor (Character or Corporation):
+- [x] **Step 3: Handle the command**
+In `commands/commands.go` inside the `switch i.ApplicationCommandData().Name`, add the `set_missing_seat_role` case:
 
-**If Character:**
-1.  Check if the EVE character is mapped to a Discord user in the database.
-2.  If Mapped: Display the Discord user ping (e.g., `<@USER_ID>`).
-3.  If Not Mapped: Display the EVE character's name formatted as a Markdown link to their EVEWho page: `[Character Name](https://evewho.com/character/CHARACTER_ID)`
+```go
+	case "set_missing_seat_role":
+		opt := i.ApplicationCommandData().Options
+		var roleID string
+		if len(opt) > 0 {
+			roleID = opt[0].RoleValue(s, i.GuildID).ID
+		}
 
-**If Corporation:**
-1.  Check if the EVE corporation is mapped to a Discord role in the database.
-2.  If Mapped: Display the Discord role ping (e.g., `<@&ROLE_ID>`).
-3.  If Not Mapped: Display the EVE corporation's name formatted as a Markdown link to their EVEWho page: `[Corporation Name](https://evewho.com/corporation/CORP_ID)`
+		if roleID == "" {
+			_, err := db.DB.Exec("DELETE FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID)
+			if err != nil {
+				sendResponse(s, i.Interaction, "Error disabling missing SeAT role.")
+				return
+			}
+			sendResponse(s, i.Interaction, "Missing SeAT role has been disabled.")
+			return
+		}
 
-### Leaderboard Specifics:
-*   Title/Header explaining what the leaderboard represents (e.g., "Top 50 Donors All Time").
-*   For each of the top 50 entities, show:
-    *   The resolved entity name/ping (from rules above).
-    *   Total ISK donated (formatted clearly, e.g., `1,000,000,000 ISK`).
-    *   Number of times donated (e.g., `(5 donations)`).
+		_, err := db.DB.Exec("INSERT OR REPLACE INTO config (guild_id, key, value) VALUES (?, 'missing_seat_role', ?)", guildID, roleID)
+		if err != nil {
+			sendResponse(s, i.Interaction, "Error configuring missing SeAT role.")
+			return
+		}
 
-### Announcement Specifics:
-*   Triggered on new donations.
-*   Message must thank the donor.
-*   Use the exact Entity Resolution logic above for the donor.
-*   Example: "Thank you to [Resolved Entity] for the generous donation of [Amount] ISK!"
+		sendResponse(s, i.Interaction, fmt.Sprintf("Missing SeAT role configured to <@&%s>", roleID))
+```
+
+- [x] **Step 4: Update tests**
+In `commands/commands_test.go`, add `"set_missing_seat_role": true,` to `expectedCommands`.
+
+- [x] **Step 5: Run tests**
+Run: `go test ./commands/... -v`
+Expected: PASS
+
+- [x] **Step 6: Commit**
+```bash
+git add commands/commands.go commands/commands_test.go
+git commit -m "feat: add /set_missing_seat_role command"
+```
+
+### Task 2: Apply Missing Seat Role Logic to Main Characters
+
+**Files:**
+- Modify: `roles/roles.go`
+
+**Interfaces:**
+- Consumes: The `missing_seat_role` from `config` table, and `integ.SeatURL`.
+
+- [x] **Step 1: Fetch config values**
+In `roles/roles.go` inside `SyncGuild` around line 515 (where `greetingChannel` is fetched):
+```go
+		var missingSeatRoleID string
+		_ = db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID).Scan(&missingSeatRoleID)
+```
+
+- [x] **Step 2: Add logic to tracking requirement**
+In `roles/roles.go` inside the main `for discordID, charInfo := range discordToMainChar` loop:
+At the start of the loop (around line 592), define:
+```go
+			missingSeatRoleNeeded := false
+```
+
+When evaluating `corpToRole` around line 694, replace:
+```go
+					if seatNeededRoles[roleID] && !isSeatActive {
+```
+with:
+```go
+					if seatNeededRoles[roleID] && !isSeatActive {
+						missingSeatRoleNeeded = true
+```
+
+When evaluating `allianceToRole` around line 730, replace:
+```go
+					if seatNeededRoles[roleID] && !isSeatActive {
+```
+with:
+```go
+					if seatNeededRoles[roleID] && !isSeatActive {
+						missingSeatRoleNeeded = true
+```
+
+- [x] **Step 3: Apply or remove the role per user**
+At the end of the user iteration in the `for discordID, charInfo := range discordToMainChar` loop (after standing roles), add:
+```go
+			if missingSeatRoleID != "" {
+				hasMissingRole := HasRole(member.Roles, missingSeatRoleID)
+				if missingSeatRoleNeeded && !hasMissingRole {
+					errRole := dg.GuildMemberRoleAdd(guildID, discordID, missingSeatRoleID)
+					if errRole == nil && greetingChannel != "" {
+						msg := fmt.Sprintf("<@%s>, you need to log into SeAT to receive your roles. Please visit %s", discordID, integ.SeatURL)
+						_, _ = dg.ChannelMessageSend(greetingChannel, msg)
+					}
+				} else if !missingSeatRoleNeeded && hasMissingRole {
+					_ = dg.GuildMemberRoleRemove(guildID, discordID, missingSeatRoleID)
+				}
+			}
+```
+
+- [x] **Step 4: Run tests**
+Run: `go build ./roles/...`
+Expected: Build passes.
+
+- [x] **Step 5: Commit**
+```bash
+git add roles/roles.go
+git commit -m "feat: enforce missing_seat_role on main characters"
+```
+
+### Task 3: Apply Missing Seat Role Logic to Guest/Alt Characters
+
+**Files:**
+- Modify: `roles/guest_roles.go`
+
+**Interfaces:**
+- Consumes: The same `missing_seat_role` logic.
+
+- [x] **Step 1: Fetch config values**
+In `roles/guest_roles.go` inside `SyncGuestRoles` where `greetingChannel` is fetched (around line 131):
+```go
+		var missingSeatRoleID string
+		_ = db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID).Scan(&missingSeatRoleID)
+
+		integ, _ := db.GetGuildIntegration(guildID)
+```
+
+- [x] **Step 2: Add logic to tracking requirement**
+In `roles/guest_roles.go` inside the main `for _, cmap := range activeMappings` loop (around line 240), add:
+```go
+			missingSeatRoleNeeded := false
+```
+
+Inside the loop where `if seatNeededRoles[roleID] && !isSeatActive` is checked for corps (around line 251 and 278):
+Change `if seatNeededRoles[roleID] && !isSeatActive {` to also set `missingSeatRoleNeeded = true`.
+
+For alliance checks (around line 295):
+Change `if seatNeededRoles[roleID] && !isSeatActive {` to also set `missingSeatRoleNeeded = true`.
+
+- [x] **Step 3: Apply or remove the role per user**
+At the end of the `cmap` user iteration (after standing roles loop), add:
+```go
+			if missingSeatRoleID != "" {
+				hasMissingRole := HasRole(member.Roles, missingSeatRoleID)
+				if missingSeatRoleNeeded && !hasMissingRole {
+					errRole := dg.GuildMemberRoleAdd(guildID, discordID, missingSeatRoleID)
+					if errRole == nil && greetingChannel != "" {
+						msg := fmt.Sprintf("<@%s>, you need to log into SeAT to receive your roles. Please visit %s", discordID, integ.SeatURL)
+						_, _ = dg.ChannelMessageSend(greetingChannel, greetMsg)
+					}
+				} else if !missingSeatRoleNeeded && hasMissingRole {
+					_ = dg.GuildMemberRoleRemove(guildID, discordID, missingSeatRoleID)
+				}
+			}
+```
+
+- [x] **Step 4: Run tests**
+Run: `go build ./roles/...`
+Expected: Build passes.
+
+- [x] **Step 5: Commit**
+```bash
+git add roles/guest_roles.go
+git commit -m "feat: enforce missing_seat_role on guest characters"
+```
+
+### Task 4: Update Documentation
+
+**Files:**
+- Modify: `docs/commands.md`
+- Modify: `docs/usage.md`
+
+- [x] **Step 1: Add command to docs/commands.md**
+Add the new command to the list in alphabetical or logical order:
+```markdown
+* `/set_missing_seat_role`: Set a role to assign to users who need to log into SeAT but haven't.
+```
+
+- [x] **Step 2: Add command to docs/usage.md**
+Add the new command under the SeAT Integration section or relevant list:
+```markdown
+* `/set_missing_seat_role` to automatically tag users lacking SeAT registration and prompt them in the greeting channel.
+```
+
+- [x] **Step 3: Commit**
+```bash
+git add docs/commands.md docs/usage.md
+git commit -m "docs: document /set_missing_seat_role"
+```
