@@ -113,6 +113,23 @@ func TestGenerate2FACode(t *testing.T) {
 	}
 }
 
+func TestFormatMissingSeatGreeting(t *testing.T) {
+	// With SeAT URL
+	msg := FormatMissingSeatGreeting("123456789", "https://seat.example.com")
+	expected := "<@123456789>, you need to log into SeAT to receive your roles. Please visit https://seat.example.com"
+	if msg != expected {
+		t.Errorf("expected %q, got %q", expected, msg)
+	}
+
+	// Without SeAT URL
+	msgNoURL := FormatMissingSeatGreeting("123456789", "")
+	expectedNoURL := "<@123456789>, you need to log into SeAT to receive your roles."
+	if msgNoURL != expectedNoURL {
+		t.Errorf("expected %q, got %q", expectedNoURL, msgNoURL)
+	}
+}
+
+
 func TestHasRole(t *testing.T) {
 	roles := []string{"111", "222", "333"}
 	if !HasRole(roles, "222") {

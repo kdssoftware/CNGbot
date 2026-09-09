@@ -517,6 +517,9 @@ func CheckRoles(dg *discordgo.Session) {
 		var guestRoleID string
 		_ = db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'guest_role'", guildID).Scan(&guestRoleID)
 
+		var missingSeatRoleID string
+		_ = db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID).Scan(&missingSeatRoleID)
+
 		excludedUsers := make(map[string]bool)
 		exUsersRows, err := db.DB.Query("SELECT discord_id FROM excluded_users WHERE guild_id = ?", guildID)
 		if err == nil {
@@ -575,6 +578,7 @@ func CheckRoles(dg *discordgo.Session) {
 			}
 
 			isSeatActive := validSeatChars != nil && validSeatChars[charID]
+			missingSeatRoleNeeded := false
 
 			var isVerified bool
 			var vCount int
@@ -692,6 +696,7 @@ func CheckRoles(dg *discordgo.Session) {
 			for corpID, roleID := range corpToRole {
 				if charInfo.CorporationID == corpID {
 					if seatNeededRoles[roleID] && !isSeatActive {
+						missingSeatRoleNeeded = true
 						if HasRole(member.Roles, roleID) {
 							msg := fmt.Sprintf("Removing Corp role <@&%s> from user <@%s> (Char: %s, Mapped Corp: %s) because character is not active in SeAT.", roleID, discordID, charName, GetCorpName(corpID))
 							db.DiscordLog(dg, guildID, msg)
@@ -728,6 +733,7 @@ func CheckRoles(dg *discordgo.Session) {
 			for allianceID, roleID := range allianceToRole {
 				if charInfo.AllianceID == allianceID {
 					if seatNeededRoles[roleID] && !isSeatActive {
+						missingSeatRoleNeeded = true
 						if HasRole(member.Roles, roleID) {
 							msg := fmt.Sprintf("Removing Alliance role <@&%s> from user <@%s> (Char: %s, Mapped Alliance: %s) because character is not active in SeAT.", roleID, discordID, charName, GetAllianceName(allianceID))
 							db.DiscordLog(dg, guildID, msg)
@@ -790,6 +796,30 @@ func CheckRoles(dg *discordgo.Session) {
 						if err != nil {
 							db.DiscordLog(dg, guildID, fmt.Sprintf("Failed to add Guest role <@&%s> to user <@%s>: %v", guestRoleID, discordID, err))
 						}
+					}
+				}
+			}
+
+			if missingSeatRoleID != "" {
+				hasMissingRole := HasRole(member.Roles, missingSeatRoleID)
+				if missingSeatRoleNeeded {
+					if !hasMissingRole {
+						msg := fmt.Sprintf("Adding Missing SeAT role <@&%s> to user <@%s> (Char: %s) because character is not active in SeAT.", missingSeatRoleID, discordID, charName)
+						db.DiscordLog(dg, guildID, msg)
+						err := dg.GuildMemberRoleAdd(guildID, discordID, missingSeatRoleID)
+						if err != nil {
+							db.DiscordLog(dg, guildID, fmt.Sprintf("Failed to add Missing SeAT role <@&%s> to user <@%s>: %v", missingSeatRoleID, discordID, err))
+						} else if greetingChannel != "" {
+							greetMsg := FormatMissingSeatGreeting(discordID, integ.SeatURL)
+							_, _ = dg.ChannelMessageSend(greetingChannel, greetMsg)
+						}
+					}
+				} else if hasMissingRole {
+					msg := fmt.Sprintf("Removing Missing SeAT role <@&%s> from user <@%s> because character is now active in SeAT or no longer requires it.", missingSeatRoleID, discordID)
+					db.DiscordLog(dg, guildID, msg)
+					err := dg.GuildMemberRoleRemove(guildID, discordID, missingSeatRoleID)
+					if err != nil {
+						db.DiscordLog(dg, guildID, fmt.Sprintf("Failed to remove Missing SeAT role <@&%s> from user <@%s>: %v", missingSeatRoleID, discordID, err))
 					}
 				}
 			}
@@ -995,4 +1025,11 @@ func HandleDirectMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	_, _ = s.ChannelMessageSend(m.ChannelID, "Invalid two factor authentication code. Please check your EVE-mail and try again, or reply with 'resend 2FA' for a new code.")
+}
+
+func FormatMissingSeatGreeting(discordID, seatURL string) string {
+	if seatURL != "" {
+		return fmt.Sprintf("<@%s>, you need to log into SeAT to receive your roles. Please visit %s", discordID, seatURL)
+	}
+	return fmt.Sprintf("<@%s>, you need to log into SeAT to receive your roles.", discordID)
 }
