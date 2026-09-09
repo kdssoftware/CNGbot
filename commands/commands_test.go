@@ -38,6 +38,7 @@ func TestApplicationCommandsDefinitions(t *testing.T) {
 		"toggle_automap":         true,
 		"set_greeting":           true,
 		"set_guest":              true,
+		"set_missing_seat_role":  true,
 		"map_standing_terrible":  true,
 		"map_standing_bad":       true,
 		"map_standing_neutral":   true,

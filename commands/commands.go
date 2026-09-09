@@ -356,6 +356,18 @@ var Commands = []*discordgo.ApplicationCommand{
 		},
 	},
 	{
+		Name:        "set_missing_seat_role",
+		Description: "Set a role to assign to users who need to log into SeAT but haven't (omit to disable)",
+		Options: []*discordgo.ApplicationCommandOption{
+			{
+				Type:        discordgo.ApplicationCommandOptionRole,
+				Name:        "role",
+				Description: "The Discord role to assign (omit to disable)",
+				Required:    false,
+			},
+		},
+	},
+	{
 		Name:        "map_standing_terrible",
 		Description: "Map a Discord role to EVE Online Terrible standing (-10.0 to -5.0)",
 		Options: []*discordgo.ApplicationCommandOption{
@@ -1567,6 +1579,13 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				guestRoleDisplay = fmt.Sprintf("<@&%s>", guestRole)
 			}
 
+			var missingSeatRole string
+			_ = db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID).Scan(&missingSeatRole)
+			missingSeatRoleDisplay := "disabled"
+			if missingSeatRole != "" {
+				missingSeatRoleDisplay = fmt.Sprintf("<@&%s>", missingSeatRole)
+			}
+
 			reportMsg := "**CNG Mapping and Server Sync Report**\n\n"
 			reportMsg += fmt.Sprintf("**Role Logs Channel:** %s (Status: %s)\n", logChanDisplay, logStatus)
 			reportMsg += fmt.Sprintf("**EVE Mail Channel:** %s\n", mailChanDisplay)
@@ -1574,7 +1593,8 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			reportMsg += fmt.Sprintf("**Automatic Member Mapping:** %s\n", autoMapStatus)
 			reportMsg += fmt.Sprintf("**Two-Factor Auth (2FA):** %s\n", twoFAStatus)
 			reportMsg += fmt.Sprintf("**Join Greetings:** %s\n", greetStatus)
-			reportMsg += fmt.Sprintf("**Guest Role Fallback:** %s\n\n", guestRoleDisplay)
+			reportMsg += fmt.Sprintf("**Guest Role Fallback:** %s\n", guestRoleDisplay)
+			reportMsg += fmt.Sprintf("**Missing SeAT Role:** %s\n\n", missingSeatRoleDisplay)
 
 			if len(unmappedUsers) > 0 {
 				reportMsg += "**Unmapped Discord Users (Missing Mappings):**\n"
@@ -1702,6 +1722,7 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			"`/toggle_2fa` - Toggle requiring 2FA verification via EVE-mail before assigning mapped Discord roles.\n" +
 			"`/set_greeting [channel] [message]` - Configure automatic greeting message for new members on join (omit options to disable).\n" +
 			"`/set_guest [role]` - Set the guest role applied to mapped users whose Corp/Alliance is not yet mapped (omit option to disable).\n" +
+			"`/set_missing_seat_role [role]` - Set a role to assign to users who need to log into SeAT but haven't (omit to disable).\n" +
 			"`/map_standing_terrible [role]` - Set the role for Terrible standing (omit option to disable).\n" +
 			"`/map_standing_bad [role]` - Set the role for Bad standing (omit option to disable).\n" +
 			"`/map_standing_neutral [role]` - Set the role for Neutral standing (omit option to disable).\n" +
@@ -2165,6 +2186,49 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				return err
 			}
 			sendResponse(s, i.Interaction, fmt.Sprintf("Guest role updated to <@&%s>.", roleID))
+			go roles.CheckRoles(s)
+			return nil
+		})
+
+	case "set_missing_seat_role":
+		roleOpt := getOption(data.Options, "role")
+		if roleOpt == nil {
+			db.ExecuteOrQueue(s, i.ChannelID, func() error {
+				_, err := db.DB.Exec("DELETE FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID)
+				if err != nil {
+					return err
+				}
+				sendResponse(s, i.Interaction, "Missing SeAT role feature is now disabled.")
+				return nil
+			})
+			return
+		}
+
+		var roleID string
+		if r := roleOpt.RoleValue(s, i.GuildID); r != nil {
+			roleID = r.ID
+		} else if str, ok := roleOpt.Value.(string); ok {
+			roleID = str
+		}
+
+		if roleID == "" {
+			db.ExecuteOrQueue(s, i.ChannelID, func() error {
+				_, err := db.DB.Exec("DELETE FROM config WHERE guild_id = ? AND key = 'missing_seat_role'", guildID)
+				if err != nil {
+					return err
+				}
+				sendResponse(s, i.Interaction, "Missing SeAT role feature is now disabled.")
+				return nil
+			})
+			return
+		}
+
+		db.ExecuteOrQueue(s, i.ChannelID, func() error {
+			_, err := db.DB.Exec("INSERT OR REPLACE INTO config (guild_id, key, value) VALUES (?, 'missing_seat_role', ?)", guildID, roleID)
+			if err != nil {
+				return err
+			}
+			sendResponse(s, i.Interaction, fmt.Sprintf("Missing SeAT role configured to <@&%s>.", roleID))
 			go roles.CheckRoles(s)
 			return nil
 		})
