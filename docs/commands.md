@@ -36,6 +36,7 @@ Here is a full list of all available commands for the CNG Bot and what they do.
 * `/toggle_automap`: Toggle automatic character mapping of new server members on join.
 * `/set_greeting`: Configure automatic greeting message for new members on join.
 * `/set_guest`: Set the guest role applied to mapped users whose Corp or Alliance is not yet mapped.
+* `/set_missing_seat_role`: Set a role to assign to users who need to log into SeAT but haven't.
 * `/map_standing_terrible`: Map a Discord role to EVE Online Terrible standing.
 * `/map_standing_bad`: Map a Discord role to EVE Online Bad standing.
 * `/map_standing_neutral`: Map a Discord role to EVE Online Neutral standing.

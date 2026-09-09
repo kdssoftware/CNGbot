@@ -42,4 +42,5 @@ Enforce registration and verification for your server members.
 Helpful commands include:
 * `/toggle_2fa` to require a verification code sent via EVE mail.
 * `/seat_needed_roles` to require SeAT registration for specific corporation or alliance roles.
+* `/set_missing_seat_role` to automatically tag users lacking SeAT registration and prompt them in the greeting channel.
 * `/exclude_2fa` to bypass the verification requirement for certain roles.
