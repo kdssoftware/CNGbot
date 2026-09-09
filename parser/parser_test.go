@@ -53,6 +53,8 @@ func TestInjectDiscordTimestamps(t *testing.T) {
 		// Sentences and Idempotence
 		{"Sentence with multiple times", "Fleet is at 20:00 eve time and second fleet is at 22:00.", "Fleet is at 20:00 eve time (<t:1788897600:F>) and second fleet is at 22:00 (<t:1788818400:F>)."},
 		{"Already formatted timestamp", "21:00 Eve Time (<t:1788814800:F>)", "21:00 Eve Time (<t:1788814800:F>)"},
+		{"Time inside HTML href tag not matched", `<a href="https://example.com/op?time=20:00">Link</a>`, `<a href="https://example.com/op?time=20:00">Link</a>`},
+		{"Time inside anchor text matched", `<a href="https://example.com">Fleet at 20:00 eve time</a>`, `<a href="https://example.com">Fleet at 20:00 eve time (<t:1788897600:F>)</a>`},
 
 		// Negative matches (should not change)
 		{"Bare duration 7 days", "7 days", "7 days"},
