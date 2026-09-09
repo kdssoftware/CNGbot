@@ -37,11 +37,38 @@ type EsiMailBody struct {
 	Body string `json:"body"`
 }
 
+var (
+	reBr       = regexp.MustCompile(`(?i)<br\s*/?>`)
+	reTags     = regexp.MustCompile(`<[^>]*>`)
+	reOpeningA = regexp.MustCompile(`(?is)^<a(?:\s+[^>]*)?>$`)
+	reClosingA = regexp.MustCompile(`(?is)^</a\s*>$`)
+	reHttpHref = regexp.MustCompile(`(?i)(?:^<a|\s)href\s*=\s*["']?\s*https?://`)
+)
+
 func CleanEveMailBody(rawBody string) string {
-	reBr := regexp.MustCompile(`(?i)<br\s*/?>`)
 	text := reBr.ReplaceAllString(rawBody, "\n")
-	reTags := regexp.MustCompile(`<[^>]*>`)
-	text = reTags.ReplaceAllString(text, "")
+	var aStack []bool
+	text = reTags.ReplaceAllStringFunc(text, func(tag string) string {
+		if reOpeningA.MatchString(tag) {
+			if reHttpHref.MatchString(tag) {
+				aStack = append(aStack, true)
+				return tag
+			}
+			aStack = append(aStack, false)
+			return ""
+		}
+		if reClosingA.MatchString(tag) {
+			if len(aStack) > 0 {
+				keep := aStack[len(aStack)-1]
+				aStack = aStack[:len(aStack)-1]
+				if keep {
+					return tag
+				}
+			}
+			return ""
+		}
+		return ""
+	})
 	text = html.UnescapeString(text)
 	return strings.TrimSpace(text)
 }

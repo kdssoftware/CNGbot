@@ -9,11 +9,70 @@ import (
 )
 
 func TestCleanEveMailBody(t *testing.T) {
-	raw := `<font size="12" color="#bfffffff">Hello<br><br>This is a <b>test</b> message &amp; greetings.<br/></font>`
-	expected := "Hello\n\nThis is a test message & greetings."
-	cleaned := CleanEveMailBody(raw)
-	if cleaned != expected {
-		t.Fatalf("expected:\n%q\ngot:\n%q", expected, cleaned)
+	tests := []struct {
+		name     string
+		raw      string
+		expected string
+	}{
+		{
+			name:     "basic formatting tags stripped and br to newline",
+			raw:      `<font size="12" color="#bfffffff">Hello<br><br>This is a <b>test</b> message &amp; greetings.<br/></font>`,
+			expected: "Hello\n\nThis is a test message & greetings.",
+		},
+		{
+			name:     "preserve https link",
+			raw:      `<font size="12">Join our Discord: <a href="https://discord.gg/abc">https://discord.gg/abc</a></font>`,
+			expected: `Join our Discord: <a href="https://discord.gg/abc">https://discord.gg/abc</a>`,
+		},
+		{
+			name:     "preserve http link",
+			raw:      `Visit <a href="http://eve-gate.net">our site</a> for details.`,
+			expected: `Visit <a href="http://eve-gate.net">our site</a> for details.`,
+		},
+		{
+			name:     "strip non-http/https eve links like showinfo and fitting",
+			raw:      `Meet at <a href="showinfo:1373//10000002">Jita IV - 4</a> in your <a href="fitting:1234:...">Rifter</a>.`,
+			expected: `Meet at Jita IV - 4 in your Rifter.`,
+		},
+		{
+			name:     "mixed http and non-http links",
+			raw:      `Check <a href="showinfo:1373//10000002">Jita</a> and <a href="https://zkillboard.com">Zkill</a> and <a href="http://example.com">Example</a>.`,
+			expected: `Check Jita and <a href="https://zkillboard.com">Zkill</a> and <a href="http://example.com">Example</a>.`,
+		},
+		{
+			name:     "nested formatting inside allowed link stripped",
+			raw:      `<a href="https://example.com"><b>Bold Link</b></a>`,
+			expected: `<a href="https://example.com">Bold Link</a>`,
+		},
+		{
+			name:     "case insensitivity of scheme and tags",
+			raw:      `<a href="HTTPS://EXAMPLE.COM">Capital Scheme</a> and <A HREF="HTTP://EXAMPLE.COM">Capital Tag</A>`,
+			expected: `<a href="HTTPS://EXAMPLE.COM">Capital Scheme</a> and <A HREF="HTTP://EXAMPLE.COM">Capital Tag</A>`,
+		},
+		{
+			name:     "extra attributes in a tag preserved",
+			raw:      `<a target="_blank" href="https://example.com" class="external">Link</a>`,
+			expected: `<a target="_blank" href="https://example.com" class="external">Link</a>`,
+		},
+		{
+			name:     "other schemes stripped",
+			raw:      `Contact <a href="mailto:pilot@eve.com">pilot</a> or <a href="javascript:void(0)">click</a>.`,
+			expected: `Contact pilot or click.`,
+		},
+		{
+			name:     "anchor without href or empty href stripped",
+			raw:      `Anchor <a name="top">Top</a> and <a href="">Empty</a>.`,
+			expected: `Anchor Top and Empty.`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cleaned := CleanEveMailBody(tt.raw)
+			if cleaned != tt.expected {
+				t.Fatalf("expected:\n%q\ngot:\n%q", tt.expected, cleaned)
+			}
+		})
 	}
 }
 

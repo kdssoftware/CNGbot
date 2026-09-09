@@ -110,6 +110,13 @@ func isValidCandidate(text string, c matchCandidate) bool {
 		return false
 	}
 
+	// Do not match inside an HTML tag or Discord tag <...>
+	if lastOpen := strings.LastIndexByte(text[:c.start], '<'); lastOpen != -1 {
+		if lastClose := strings.LastIndexByte(text[:c.start], '>'); lastOpen > lastClose {
+			return false
+		}
+	}
+
 	// Do not match if preceded by letter, digit, colon, or slash
 	if c.start > 0 {
 		prev := text[c.start-1]
