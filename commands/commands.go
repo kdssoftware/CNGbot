@@ -1331,11 +1331,30 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			_ = rows.Close()
 
 			var cleanedUpCount int
+			var actuallyCleanedUp []string
+
+			// Ensure our tracking table exists
+			_, _ = db.DB.Exec("CREATE TABLE IF NOT EXISTS cleaned_up_users (guild_id TEXT, discord_id TEXT, PRIMARY KEY (guild_id, discord_id))")
+
 			for _, dID := range leftServer {
 				// In multi-server mode, leaving one server does not delete global mapping if they could be on other servers
 				// But we clean up guild-specific exclusions/attempts
 				_, _ = db.DB.Exec("DELETE FROM auto_map_attempts WHERE guild_id = ? AND discord_id = ?", guildID, dID)
-				cleanedUpCount++
+				_, _ = db.DB.Exec("DELETE FROM excluded_users WHERE guild_id = ? AND discord_id = ?", guildID, dID)
+				_, _ = db.DB.Exec("DELETE FROM excluded_mappings WHERE guild_id = ? AND discord_id = ?", guildID, dID)
+				
+				var exists int
+				_ = db.DB.QueryRow("SELECT COUNT(*) FROM cleaned_up_users WHERE guild_id = ? AND discord_id = ?", guildID, dID).Scan(&exists)
+				if exists == 0 {
+					_, _ = db.DB.Exec("INSERT INTO cleaned_up_users (guild_id, discord_id) VALUES (?, ?)", guildID, dID)
+					actuallyCleanedUp = append(actuallyCleanedUp, dID)
+					cleanedUpCount++
+				}
+			}
+
+			// Clean up the tracking table for users who are currently in the server (in case they re-joined)
+			for dID := range guildMemberMap {
+				_, _ = db.DB.Exec("DELETE FROM cleaned_up_users WHERE guild_id = ? AND discord_id = ?", guildID, dID)
 			}
 
 			excludedMappingIDs := make(map[string]bool)
@@ -1682,10 +1701,10 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				}
 			}
 
-			if len(leftServer) > 0 {
+			if len(actuallyCleanedUp) > 0 {
 				reportMsg += "\n**Cleaned up mappings from users who've left:**\n"
-				for _, dID := range leftServer {
-					reportMsg += fmt.Sprintf("- Discord ID: %s (Removed mapping)\n", dID)
+				for _, dID := range actuallyCleanedUp {
+					reportMsg += fmt.Sprintf("- Discord ID: %s (Removed guild mapping state)\n", dID)
 				}
 				reportMsg += fmt.Sprintf("\n_Successfully removed %d obsolete mappings._\n", cleanedUpCount)
 			}

@@ -566,6 +566,7 @@ func CheckRoles(dg *discordgo.Session) {
 					db.DiscordLog(dg, guildID, msg)
 					_, _ = db.DB.Exec("DELETE FROM character_to_discord WHERE discord_id = ?", discordID)
 					_, _ = db.DB.Exec("DELETE FROM auto_map_attempts WHERE guild_id = ? AND discord_id = ?", guildID, discordID)
+					RemoveCorpAndAllianceRoles(dg, guildID, member)
 					continue
 				}
 			}
