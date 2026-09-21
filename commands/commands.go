@@ -2889,6 +2889,12 @@ func StartAutoMapWorker(s *discordgo.Session) {
 					msg := fmt.Sprintf("Discord username %s could not be found as eve-online game character, unable to automatically map the discord user's roles.", searchName)
 					db.DiscordLog(s, guildID, msg)
 
+					db.ExecuteOrQueue(s, "", func() error {
+						_, _ = db.DB.Exec("DELETE FROM character_to_discord WHERE discord_id = ?", discordID)
+						roles.RemoveCorpAndAllianceRoles(s, guildID, member)
+						return nil
+					})
+
 					if len(member.Roles) == 0 {
 						var guestRoleID string
 						err := db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'guest_role'", guildID).Scan(&guestRoleID)

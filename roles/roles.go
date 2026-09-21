@@ -1033,3 +1033,37 @@ func FormatMissingSeatGreeting(discordID, seatURL string) string {
 	}
 	return fmt.Sprintf("<@%s>, you need to log into SeAT to receive your roles.", discordID)
 }
+
+func RemoveCorpAndAllianceRoles(s *discordgo.Session, guildID string, member *discordgo.Member) {
+	if member == nil || member.User == nil {
+		return
+	}
+	discordID := member.User.ID
+
+	corpRows, err := db.DB.Query("SELECT role_id FROM corp_to_role WHERE guild_id = ?", guildID)
+	if err == nil {
+		for corpRows.Next() {
+			var roleID string
+			if err := corpRows.Scan(&roleID); err == nil {
+				if HasRole(member.Roles, roleID) {
+					_ = s.GuildMemberRoleRemove(guildID, discordID, roleID)
+				}
+			}
+		}
+		_ = corpRows.Close()
+	}
+
+	allianceRows, err := db.DB.Query("SELECT role_id FROM alliance_to_role WHERE guild_id = ?", guildID)
+	if err == nil {
+		for allianceRows.Next() {
+			var roleID string
+			if err := allianceRows.Scan(&roleID); err == nil {
+				if HasRole(member.Roles, roleID) {
+					_ = s.GuildMemberRoleRemove(guildID, discordID, roleID)
+				}
+			}
+		}
+		_ = allianceRows.Close()
+	}
+}
+
