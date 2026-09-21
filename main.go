@@ -1,9 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"runtime/debug"
+	"strings"
 	"syscall"
 
 	"evemaildiscord/commands"
@@ -16,6 +20,24 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 )
+
+func getCommitHash() string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	if out, err := cmd.Output(); err == nil {
+		hash := strings.TrimSpace(string(out))
+		if hash != "" {
+			return hash
+		}
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, setting := range info.Settings {
+			if setting.Key == "vcs.revision" {
+				return setting.Value
+			}
+		}
+	}
+	return "unknown"
+}
 
 func main() {
 	if err := db.InitDB(); err != nil {
@@ -60,10 +82,11 @@ func main() {
 				_ = rows.Close()
 			}
 			if len(adminRoles) > 0 {
-				msg := "Bot restarted. Currently accepting commands from the admin roles."
+				msg := fmt.Sprintf("Bot restarted (commit: %s). Currently accepting commands from the admin roles.", getCommitHash())
 				db.DiscordLog(dg, guildID, msg)
 			} else {
-				db.DiscordLog(dg, guildID, "Bot restarted. No admin roles mapped! Any server member can execute the `/map_admin` command.")
+				msg := fmt.Sprintf("Bot restarted (commit: %s). No admin roles mapped! Any server member can execute the `/map_admin` command.", getCommitHash())
+				db.DiscordLog(dg, guildID, msg)
 			}
 		}
 	}()
