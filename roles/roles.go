@@ -870,17 +870,6 @@ func CheckRoles(dg *discordgo.Session) {
 						}
 					}
 				}
-			} else if len(standingToRole) > 0 {
-				for _, sRoleID := range standingToRole {
-					if HasRole(member.Roles, sRoleID) {
-						msg := fmt.Sprintf("Removing Standing role <@&%s> from user <@%s> (Char: %s) because standings could not be resolved.", sRoleID, discordID, charName)
-						db.DiscordLog(dg, guildID, msg)
-						err := dg.GuildMemberRoleRemove(guildID, discordID, sRoleID)
-						if err != nil {
-							db.DiscordLog(dg, guildID, fmt.Sprintf("Failed to remove Standing role <@&%s> from user <@%s>: %v", sRoleID, discordID, err))
-						}
-					}
-				}
 			}
 		}
 	}

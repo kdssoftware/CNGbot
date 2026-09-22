@@ -84,6 +84,10 @@ func TestResolveStanding(t *testing.T) {
 	if val := ResolveStanding(standings, aff5); val != 0.0 {
 		t.Errorf("expected 0.0 (neutral default), got %f", val)
 	}
+
+	if val := ResolveStanding(nil, aff1); val != 0.0 {
+		t.Errorf("expected 0.0 for nil standings map, got %f", val)
+	}
 }
 
 func TestEsiStandingID(t *testing.T) {
