@@ -66,6 +66,21 @@ func TestBuildMessage(t *testing.T) {
 	}
 }
 
+func TestFinishedStates(t *testing.T) {
+	// Every ESI state that means "finished" must be covered, including Closed
+	// (manually closed) and Expired, which keep their old last_modified.
+	for _, state := range []string{"Completed", "Expired", "Closed"} {
+		if _, ok := finishedStates[state]; !ok {
+			t.Errorf("state %q should be treated as finished", state)
+		}
+	}
+	for _, state := range []string{"Active", "Deleted", "Unspecified", ""} {
+		if _, ok := finishedStates[state]; ok {
+			t.Errorf("state %q should not be treated as finished", state)
+		}
+	}
+}
+
 func TestESITimeParsing(t *testing.T) {
 	// Timestamps with and without fractional seconds must compare correctly.
 	a := parseESITime("2025-06-01T00:00:00.100Z")

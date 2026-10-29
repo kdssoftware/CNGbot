@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -97,7 +98,9 @@ func createOrMigrateTables(database *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS projects_state (
 			guild_id TEXT PRIMARY KEY,
 			projects_watermark TEXT NOT NULL DEFAULT '',
-			jobs_watermark TEXT NOT NULL DEFAULT ''
+			jobs_watermark TEXT NOT NULL DEFAULT '',
+			projects_posted TEXT NOT NULL DEFAULT '',
+			jobs_posted TEXT NOT NULL DEFAULT ''
 		);
 	`)
 	if err != nil {
@@ -122,6 +125,27 @@ func createOrMigrateTables(database *sql.DB) error {
 		_ = colRows.Close()
 		if !hasBalance {
 			_, _ = database.Exec("ALTER TABLE DonationRecord ADD COLUMN balance REAL NOT NULL DEFAULT 0;")
+		}
+	}
+
+	// Ensure posted-ID columns exist on projects_state
+	colRows, err = database.Query("PRAGMA table_info(projects_state)")
+	if err == nil {
+		var cols []string
+		for colRows.Next() {
+			var cid int
+			var name, colType string
+			var notNull, pk int
+			var dfltValue *string
+			if colRows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk) == nil {
+				cols = append(cols, strings.ToLower(name))
+			}
+		}
+		_ = colRows.Close()
+		for _, col := range []string{"projects_posted", "jobs_posted"} {
+			if !slices.Contains(cols, col) {
+				_, _ = database.Exec(fmt.Sprintf("ALTER TABLE projects_state ADD COLUMN %s TEXT NOT NULL DEFAULT '';", col))
+			}
 		}
 	}
 
@@ -751,6 +775,55 @@ func SetProjectsWatermark(guildID, kind, watermark string) error {
 		INSERT INTO projects_state (guild_id, %s) VALUES (?, ?)
 		ON CONFLICT(guild_id) DO UPDATE SET %s = excluded.%s
 	`, projectsStateColumn(kind), projectsStateColumn(kind), projectsStateColumn(kind)), guildID, watermark)
+	return err
+}
+
+func projectsPostedColumn(kind string) string {
+	if kind == "project" {
+		return "projects_posted"
+	}
+	return "jobs_posted"
+}
+
+// GetProjectsPostedIDs returns the IDs of already-posted finished entries for a
+// kind ("project" or "freelance job"). Finished entries are deduped by ID
+// instead of timestamp because expired/closed jobs may keep the last_modified
+// they had while active.
+func GetProjectsPostedIDs(guildID, kind string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if DB == nil {
+		return out, fmt.Errorf("database not initialized")
+	}
+	var raw string
+	err := DB.QueryRow(fmt.Sprintf("SELECT %s FROM projects_state WHERE guild_id = ?", projectsPostedColumn(kind)), guildID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return out, nil
+	}
+	if err != nil {
+		return out, err
+	}
+	for _, id := range strings.Split(raw, ",") {
+		if id != "" {
+			out[id] = true
+		}
+	}
+	return out, nil
+}
+
+// SetProjectsPostedIDs stores the IDs of already-posted finished entries.
+func SetProjectsPostedIDs(guildID, kind string, ids map[string]bool) error {
+	if DB == nil {
+		return fmt.Errorf("database not initialized")
+	}
+	list := make([]string, 0, len(ids))
+	for id := range ids {
+		list = append(list, id)
+	}
+	slices.Sort(list)
+	_, err := DB.Exec(fmt.Sprintf(`
+		INSERT INTO projects_state (guild_id, %s) VALUES (?, ?)
+		ON CONFLICT(guild_id) DO UPDATE SET %s = excluded.%s
+	`, projectsPostedColumn(kind), projectsPostedColumn(kind), projectsPostedColumn(kind)), guildID, strings.Join(list, ","))
 	return err
 }
 

@@ -36,6 +36,7 @@ const (
 var finishedStates = map[string]string{
 	"Completed": "completed",
 	"Expired":   "expired",
+	"Closed":    "closed",
 }
 
 type finishedEntry struct {
@@ -160,6 +161,10 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 	if err != nil {
 		return err
 	}
+	postedIDs, err := db.GetProjectsPostedIDs(guildID, kind)
+	if err != nil {
+		return err
+	}
 
 	var listURL string
 	if kind == "project" {
@@ -168,11 +173,13 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 		listURL = fmt.Sprintf("https://esi.evetech.net/corporations/%d/freelance-jobs/?limit=100", corpID)
 	}
 
-	// Walk newest-first pages, collecting finished entries newer than the watermark.
-	var newFinished []finishedEntry
+	// Finished entries are deduped by ID, not by timestamp: expired/closed
+	// entries may keep the last_modified they had while active, so a timestamp
+	// watermark (which advances with every active entry's contribution) would
+	// skip them forever.
+	var finishedSeen, newFinished []finishedEntry
 	maxSeen := watermark
 	cursorBefore := ""
-	wmTime := parseESITime(watermark)
 	for page := 0; page < maxPagesPerPoll; page++ {
 		var l listing
 		pageURL := listURL
@@ -182,28 +189,33 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 		if err := esiGetJSON(client, pageURL, &l); err != nil {
 			return err
 		}
-		olderThanWatermark := false
 		for _, e := range l.Entries {
-			t := parseESITime(e.LastModified)
-			if t.After(parseESITime(maxSeen)) {
+			if t := parseESITime(e.LastModified); t.After(parseESITime(maxSeen)) {
 				maxSeen = e.LastModified
 			}
-			if !wmTime.IsZero() && !t.After(wmTime) {
-				olderThanWatermark = true
+			if _, done := finishedStates[e.State]; !done {
 				continue
 			}
-			if _, done := finishedStates[e.State]; done {
+			finishedSeen = append(finishedSeen, e)
+			if !postedIDs[e.ID] {
 				newFinished = append(newFinished, e)
 			}
 		}
-		if olderThanWatermark || l.Cursor == nil || l.Cursor.Before == "" {
+		if l.Cursor == nil || l.Cursor.Before == "" {
 			break
 		}
 		cursorBefore = l.Cursor.Before
 	}
 
-	// First poll: baseline only, like EVE mail.
+	// First poll: baseline only, like EVE mail — record every finished entry
+	// already visible so pre-existing ones are never posted.
 	if watermark == "" {
+		for _, e := range finishedSeen {
+			postedIDs[e.ID] = true
+		}
+		if err := db.SetProjectsPostedIDs(guildID, kind, postedIDs); err != nil {
+			return err
+		}
 		return db.SetProjectsWatermark(guildID, kind, formatESITime(parseESITime(maxSeen)))
 	}
 
@@ -212,6 +224,11 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 
 	for _, e := range newFinished {
 		if err := postFinished(dg, guildID, channelID, client, kind, corpID, e); err != nil {
+			return err
+		}
+		// Record immediately so a failure on a later post does not repost this one.
+		postedIDs[e.ID] = true
+		if err := db.SetProjectsPostedIDs(guildID, kind, postedIDs); err != nil {
 			return err
 		}
 	}

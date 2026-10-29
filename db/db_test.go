@@ -528,3 +528,65 @@ func TestWandererSeenPairs(t *testing.T) {
 		t.Fatalf("expected g1 pair still seen, got %v (err: %v)", seen, err)
 	}
 }
+
+func TestProjectsPostedIDs(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_posted_ids.db")
+
+	database, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer database.Close()
+
+	// Pre-create projects_state with the legacy schema (no posted-ID columns)
+	// to verify the migration adds them.
+	if _, err := database.Exec(`
+		CREATE TABLE projects_state (
+			guild_id TEXT PRIMARY KEY,
+			projects_watermark TEXT NOT NULL DEFAULT '',
+			jobs_watermark TEXT NOT NULL DEFAULT ''
+		);
+	`); err != nil {
+		t.Fatalf("failed to create legacy projects_state: %v", err)
+	}
+
+	if err := createOrMigrateTables(database); err != nil {
+		t.Fatalf("createOrMigrateTables failed: %v", err)
+	}
+
+	oldDB := DB
+	DB = database
+	defer func() { DB = oldDB }()
+
+	// No row yet: empty set, no error.
+	ids, err := GetProjectsPostedIDs("g1", "project")
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("expected empty posted set, got %v (err: %v)", ids, err)
+	}
+
+	// Roundtrip for one kind must not leak into the other.
+	if err := SetProjectsPostedIDs("g1", "project", map[string]bool{"a": true, "b": true}); err != nil {
+		t.Fatalf("failed to set posted ids: %v", err)
+	}
+	got, err := GetProjectsPostedIDs("g1", "project")
+	if err != nil {
+		t.Fatalf("failed to get posted ids: %v", err)
+	}
+	if !got["a"] || !got["b"] || len(got) != 2 {
+		t.Fatalf("posted ids mismatch: %v", got)
+	}
+	jobs, err := GetProjectsPostedIDs("g1", "freelance job")
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("expected empty jobs posted set, got %v (err: %v)", jobs, err)
+	}
+
+	// Empty map clears the stored set.
+	if err := SetProjectsPostedIDs("g1", "project", map[string]bool{}); err != nil {
+		t.Fatalf("failed to clear posted ids: %v", err)
+	}
+	got, err = GetProjectsPostedIDs("g1", "project")
+	if err != nil || len(got) != 0 {
+		t.Fatalf("expected cleared posted set, got %v (err: %v)", got, err)
+	}
+}
