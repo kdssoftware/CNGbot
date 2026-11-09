@@ -29,14 +29,16 @@ const (
 	// tycoonStatsURL is the EVE Tycoon market stats API (https://evetycoon.com/docs).
 	tycoonStatsURL = "https://evetycoon.com/api/v1/market/stats/%d/%d"
 
-	maxPagesPerPoll = 5
+	maxPagesPerPoll = 50
 )
 
-// ESI state names treated as "finished".
+// ESI state names treated as "finished". Deleted projects are announced too,
+// but their details are no longer available, so no deliverables are fetched.
 var finishedStates = map[string]string{
 	"Completed": "completed",
 	"Expired":   "expired",
 	"Closed":    "closed",
+	"Deleted":   "deleted",
 }
 
 type finishedEntry struct {
@@ -168,7 +170,9 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 
 	var listURL string
 	if kind == "project" {
-		listURL = fmt.Sprintf("https://esi.evetech.net/corporations/%d/projects/?limit=100", corpID)
+		// state=All is required: the API defaults to Active-only, which would
+		// never return finished projects.
+		listURL = fmt.Sprintf("https://esi.evetech.net/corporations/%d/projects/?limit=100&state=All", corpID)
 	} else {
 		listURL = fmt.Sprintf("https://esi.evetech.net/corporations/%d/freelance-jobs/?limit=100", corpID)
 	}
@@ -189,6 +193,7 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 		if err := esiGetJSON(client, pageURL, &l); err != nil {
 			return err
 		}
+		newOnPage := 0
 		for _, e := range l.Entries {
 			if t := parseESITime(e.LastModified); t.After(parseESITime(maxSeen)) {
 				maxSeen = e.LastModified
@@ -199,9 +204,16 @@ func processKind(dg *discordgo.Session, guildID, channelID string, client *http.
 			finishedSeen = append(finishedSeen, e)
 			if !postedIDs[e.ID] {
 				newFinished = append(newFinished, e)
+				newOnPage++
 			}
 		}
 		if l.Cursor == nil || l.Cursor.Before == "" {
+			break
+		}
+		// The listing is ordered newest first; once a page yields no new
+		// finished entries there is no reason to keep walking into older
+		// history, so stop early.
+		if newOnPage == 0 {
 			break
 		}
 		cursorBefore = l.Cursor.Before
@@ -262,7 +274,10 @@ func postFinished(dg *discordgo.Session, guildID, channelID string, client *http
 
 	var deliverables []deliverable
 	var err error
-	if kind == "project" {
+	if e.State == "Deleted" {
+		// Deleted projects lose their details in ESI; announce without them.
+		deliverables = nil
+	} else if kind == "project" {
 		deliverables, err = projectDeliverables(client, corpID, e.ID)
 	} else {
 		deliverables, err = jobDeliverables(client, e.ID)
