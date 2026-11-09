@@ -43,6 +43,8 @@ func CheckGuestRoles(dg *discordgo.Session) {
 	}
 	_ = rows.Close()
 
+	PrioritizeRecentJoins(charMappings, func(c CharMap) string { return c.DiscordID })
+
 	if len(charMappings) == 0 {
 		return
 	}

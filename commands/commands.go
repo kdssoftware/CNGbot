@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3216,6 +3217,10 @@ func ResolveDiscordID(s *discordgo.Session, guildID string, input string) (strin
 	return "", "", fmt.Errorf("could not resolve Discord ID for %q", input)
 }
 
+func RecentlyJoinedMember(m *discordgo.Member) bool {
+	return m != nil && !m.JoinedAt.IsZero() && time.Since(m.JoinedAt) <= time.Hour
+}
+
 func StartAutoMapWorker(s *discordgo.Session) {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
@@ -3260,12 +3265,19 @@ func StartAutoMapWorker(s *discordgo.Session) {
 				_ = exRows.Close()
 			}
 
+			sort.SliceStable(members, func(i, j int) bool {
+				return RecentlyJoinedMember(members[i]) && !RecentlyJoinedMember(members[j])
+			})
+
 			for _, member := range members {
 				if member.User == nil || member.User.Bot {
 					continue
 				}
 
 				discordID := member.User.ID
+				if RecentlyJoinedMember(member) {
+					roles.MarkRecentlyJoined(discordID)
+				}
 				if mappedIDs[discordID] {
 					continue
 				}
@@ -3396,6 +3408,9 @@ func StartAutoMapWorker(s *discordgo.Session) {
 }
 
 func GuildMemberAdd(s *discordgo.Session, m *discordgo.GuildMemberAdd) {
+	if m.Member != nil && m.Member.User != nil {
+		roles.MarkRecentlyJoined(m.Member.User.ID)
+	}
 	var greetingChannel, greetingMsg string
 	errChan := db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'greeting_channel'", m.GuildID).Scan(&greetingChannel)
 	errText := db.DB.QueryRow("SELECT value FROM config WHERE guild_id = ? AND key = 'greeting_message'", m.GuildID).Scan(&greetingMsg)

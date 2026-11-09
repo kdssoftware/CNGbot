@@ -9,8 +9,10 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"evemaildiscord/config"
@@ -275,6 +277,37 @@ func DetermineStandingType(val float64) string {
 	return StandingTerrible
 }
 
+var (
+	recentJoinsMu sync.Mutex
+	recentJoins   = make(map[string]time.Time)
+)
+
+func MarkRecentlyJoined(discordID string) {
+	recentJoinsMu.Lock()
+	recentJoins[discordID] = time.Now()
+	recentJoinsMu.Unlock()
+}
+
+func IsRecentlyJoined(discordID string) bool {
+	recentJoinsMu.Lock()
+	defer recentJoinsMu.Unlock()
+	joinedAt, ok := recentJoins[discordID]
+	if !ok {
+		return false
+	}
+	if time.Since(joinedAt) > time.Hour {
+		delete(recentJoins, discordID)
+		return false
+	}
+	return true
+}
+
+func PrioritizeRecentJoins[T any](items []T, discordID func(T) string) {
+	sort.SliceStable(items, func(i, j int) bool {
+		return IsRecentlyJoined(discordID(items[i])) && !IsRecentlyJoined(discordID(items[j]))
+	})
+}
+
 func PollRoles(dg *discordgo.Session) {
 	CheckRoles(dg)
 	ticker := time.NewTicker(60 * time.Minute)
@@ -311,6 +344,8 @@ func CheckRoles(dg *discordgo.Session) {
 	if len(charMappings) == 0 {
 		return
 	}
+
+	PrioritizeRecentJoins(charMappings, func(c CharMap) string { return c.DiscordID })
 
 	var charIDs []int
 	for _, cmap := range charMappings {
