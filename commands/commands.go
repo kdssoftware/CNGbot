@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"evemaildiscord/fleet"
 	"fmt"
 	"io"
 	"log"
@@ -24,6 +25,11 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 )
+
+func init() {
+	// Append modular commands to the global list
+	Commands = append(Commands, fleet.Commands()...)
+}
 
 var buybackMinPercent = 0.01
 var buybackMaxPercent = 1.0
@@ -578,26 +584,26 @@ var Commands = []*discordgo.ApplicationCommand{
 		},
 	},
 	{
-		Name:		 "courier_fee",
+		Name:        "courier_fee",
 		Description: "Calculates the fee for your courier contract",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
 				Type:        discordgo.ApplicationCommandOptionNumber,
-				Name:		 "volume",
+				Name:        "volume",
 				Description: "The volume of the cargo to be hauled. Defaults to 0",
-				Required:	 true,
+				Required:    true,
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionInteger,
-				Name:		 "jumps",
+				Name:        "jumps",
 				Description: "The numbers of jumps from start to finish. Defaults to 1",
-				Required:	 true,
+				Required:    true,
 			},
 			{
 				Type:        discordgo.ApplicationCommandOptionNumber,
-				Name:		 "estimate",
+				Name:        "estimate",
 				Description: "The estimated value of the cargo to be hauled. Defaults to 0",
-				Required:	 true,
+				Required:    true,
 			},
 		},
 	},
@@ -638,12 +644,12 @@ var Commands = []*discordgo.ApplicationCommand{
 		Description: "Set the buyback percentage for salvage (1 = 100%, 0.5 = 50%, 0.01 = 1%)",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:     discordgo.ApplicationCommandOptionNumber,
-				Name:     "percentage",
+				Type:        discordgo.ApplicationCommandOptionNumber,
+				Name:        "percentage",
 				Description: "Percentage as a decimal, between 0.01 and 1",
-				Required: true,
-				MinValue: &buybackMinPercent,
-				MaxValue: buybackMaxPercent,
+				Required:    true,
+				MinValue:    &buybackMinPercent,
+				MaxValue:    buybackMaxPercent,
 			},
 		},
 	},
@@ -652,12 +658,12 @@ var Commands = []*discordgo.ApplicationCommand{
 		Description: "Set the buyback percentage for gas (1 = 100%, 0.5 = 50%, 0.01 = 1%)",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:     discordgo.ApplicationCommandOptionNumber,
-				Name:     "percentage",
+				Type:        discordgo.ApplicationCommandOptionNumber,
+				Name:        "percentage",
 				Description: "Percentage as a decimal, between 0.01 and 1",
-				Required: true,
-				MinValue: &buybackMinPercent,
-				MaxValue: buybackMaxPercent,
+				Required:    true,
+				MinValue:    &buybackMinPercent,
+				MaxValue:    buybackMaxPercent,
 			},
 		},
 	},
@@ -666,12 +672,12 @@ var Commands = []*discordgo.ApplicationCommand{
 		Description: "Set the buyback percentage for ore (1 = 100%, 0.5 = 50%, 0.01 = 1%)",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:     discordgo.ApplicationCommandOptionNumber,
-				Name:     "percentage",
+				Type:        discordgo.ApplicationCommandOptionNumber,
+				Name:        "percentage",
 				Description: "Percentage as a decimal, between 0.01 and 1",
-				Required: true,
-				MinValue: &buybackMinPercent,
-				MaxValue: buybackMaxPercent,
+				Required:    true,
+				MinValue:    &buybackMinPercent,
+				MaxValue:    buybackMaxPercent,
 			},
 		},
 	},
@@ -680,12 +686,12 @@ var Commands = []*discordgo.ApplicationCommand{
 		Description: "Set the buyback percentage for blue loot (1 = 100%, 0.5 = 50%, 0.01 = 1%)",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:     discordgo.ApplicationCommandOptionNumber,
-				Name:     "percentage",
+				Type:        discordgo.ApplicationCommandOptionNumber,
+				Name:        "percentage",
 				Description: "Percentage as a decimal, between 0.01 and 1",
-				Required: true,
-				MinValue: &buybackMinPercent,
-				MaxValue: buybackMaxPercent,
+				Required:    true,
+				MinValue:    &buybackMinPercent,
+				MaxValue:    buybackMaxPercent,
 			},
 		},
 	},
@@ -694,12 +700,12 @@ var Commands = []*discordgo.ApplicationCommand{
 		Description: "Set the buyback percentage for datacores (1 = 100%, 0.5 = 50%, 0.01 = 1%)",
 		Options: []*discordgo.ApplicationCommandOption{
 			{
-				Type:     discordgo.ApplicationCommandOptionNumber,
-				Name:     "percentage",
+				Type:        discordgo.ApplicationCommandOptionNumber,
+				Name:        "percentage",
 				Description: "Percentage as a decimal, between 0.01 and 1",
-				Required: true,
-				MinValue: &buybackMinPercent,
-				MaxValue: buybackMaxPercent,
+				Required:    true,
+				MinValue:    &buybackMinPercent,
+				MaxValue:    buybackMaxPercent,
 			},
 		},
 	},
@@ -858,6 +864,11 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 		sendResponse(s, i.Interaction, "You do not have permission to execute bot commands.")
 		return
+	}
+
+	// Give modular packages a chance to handle the command first
+	if fleet.HandleCommand(s, i, cmdName, guildID, sendResponse) {
+		return // If fleet.HandleCommand returned true, it did the work. Stop here.
 	}
 
 	switch cmdName {
@@ -1534,7 +1545,7 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 				_, _ = db.DB.Exec("DELETE FROM auto_map_attempts WHERE guild_id = ? AND discord_id = ?", guildID, dID)
 				_, _ = db.DB.Exec("DELETE FROM excluded_users WHERE guild_id = ? AND discord_id = ?", guildID, dID)
 				_, _ = db.DB.Exec("DELETE FROM excluded_mappings WHERE guild_id = ? AND discord_id = ?", guildID, dID)
-				
+
 				var exists int
 				_ = db.DB.QueryRow("SELECT COUNT(*) FROM cleaned_up_users WHERE guild_id = ? AND discord_id = ?", guildID, dID).Scan(&exists)
 				if exists == 0 {
@@ -3050,8 +3061,8 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			sendResponse(s, i.Interaction, fmt.Sprintf("The estimate must be provided and greater than 0.0"))
 		}
 
-		var usingEstimate float64 = estimate * (baseFee + jumpFee * float64(jumps))
-		var usingVolume float64 = (volume / 100) + baseFee + jumpFee * float64(jumps)
+		var usingEstimate float64 = estimate * (baseFee + jumpFee*float64(jumps))
+		var usingVolume float64 = (volume / 100) + baseFee + jumpFee*float64(jumps)
 
 		finalFee := max(usingEstimate, usingVolume)
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	discordui "evemaildiscord/discordUI"
 	"fmt"
 	"log"
 	"os"
@@ -18,8 +20,8 @@ import (
 	"evemaildiscord/mail"
 	"evemaildiscord/projects"
 	"evemaildiscord/roles"
-	"evemaildiscord/web"
 	"evemaildiscord/wanderer"
+	"evemaildiscord/web"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -46,7 +48,12 @@ func main() {
 	if err := db.InitDB(); err != nil {
 		log.Fatalf("Error initializing database: %v", err)
 	}
-	defer db.DB.Close()
+	defer func(DB *sql.DB) {
+		err := DB.Close()
+		if err != nil {
+
+		}
+	}(db.DB)
 
 	dg, err := discordgo.New("Bot " + config.GetDiscordToken())
 	if err != nil {
@@ -59,11 +66,22 @@ func main() {
 	dg.AddHandler(roles.HandleDirectMessage)
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsGuildMembers | discordgo.IntentsGuildScheduledEvents | discordgo.IntentsDirectMessages
 
+	// Let packages register their UI handlers
+	fleet.InitUI()
+
+	// Hook the generic router
+	discordui.StartRouter(dg)
+
 	err = dg.Open()
 	if err != nil {
 		log.Fatalf("Error opening Discord connection: %v", err)
 	}
-	defer dg.Close()
+	defer func(dg *discordgo.Session) {
+		err := dg.Close()
+		if err != nil {
+
+		}
+	}(dg)
 	log.Println("Discord Bot is running.")
 
 	if err := commands.RegisterCommands(dg); err != nil {
