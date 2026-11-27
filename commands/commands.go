@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"evemaildiscord/commands/capital"
 	"evemaildiscord/fleet"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +31,7 @@ import (
 func init() {
 	// Append modular commands to the global list
 	Commands = append(Commands, fleet.Commands()...)
+	Commands = append(Commands, capital.Commands()...)
 }
 
 var buybackMinPercent = 0.01
@@ -732,7 +735,16 @@ func getOption(options []*discordgo.ApplicationCommandInteractionDataOption, nam
 }
 
 func sendResponse(s *discordgo.Session, interaction *discordgo.Interaction, content string, ephemeral ...bool) {
-	flags := discordgo.MessageFlagsEphemeral
+	var flags discordgo.MessageFlags
+
+	isEphemeral := true
+	if len(ephemeral) > 0 {
+		isEphemeral = ephemeral[0]
+	}
+
+	if isEphemeral {
+		flags = discordgo.MessageFlagsEphemeral
+	}
 
 	if len(content) <= 2000 {
 		_, err := s.InteractionResponseEdit(interaction, &discordgo.WebhookEdit{
@@ -784,6 +796,25 @@ func splitMessage(msg string, maxLen int) []string {
 	return chunks
 }
 
+func isPublicCommand(cmdName, subCmdName string) bool {
+	// Add any command or sub-command that should be public here.
+	// Format: "command_name": {"sub_command_1", "sub_command_2"}
+	// Use an empty string "" for top-level commands without sub-commands.
+	publicRegistry := map[string][]string{
+		"capital": {"add", "remove", "ping"},
+		// Example of future additions:
+		// "fleet":   {"status", "link"},
+		// "help":    {""},
+	}
+
+	if allowedSubs, exists := publicRegistry[cmdName]; exists {
+		if slices.Contains(allowedSubs, subCmdName) {
+			return true
+		}
+	}
+	return false
+}
+
 func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionApplicationCommand {
 		return
@@ -791,6 +822,10 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	data := i.ApplicationCommandData()
 	cmdName := data.Name
+	subCmdName := ""
+	if len(data.Options) > 0 && data.Options[0].Type == discordgo.ApplicationCommandOptionSubCommand {
+		subCmdName = data.Options[0].Name
+	}
 
 	userID := ""
 	if i.Member != nil && i.Member.User != nil {
@@ -803,11 +838,17 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 
 	log.Printf("Received slash command /%s in guild %s from <@%s>", cmdName, guildID, userID)
 
+	// Determine visibility from registry
+	var flags discordgo.MessageFlags
+	if !isPublicCommand(cmdName, subCmdName) {
+		flags = discordgo.MessageFlagsEphemeral
+	}
+
 	// Defer the interaction response immediately to satisfy Discord's 3-second deadline
 	errDefer := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Flags: discordgo.MessageFlagsEphemeral,
+			Flags: flags,
 		},
 	})
 	if errDefer != nil {
@@ -866,10 +907,20 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		return
 	}
 
+	// -----------------------------------------------------------------------
 	// Give modular packages a chance to handle the command first
-	if fleet.HandleCommand(s, i, cmdName, guildID, sendResponse) {
-		return // If fleet.HandleCommand returned true, it did the work. Stop here.
+	//
+	// If *.HandleCommand returned true, it did the work. Stop here.
+	// -----------------------------------------------------------------------
+	if capital.HandleCommand(s, i, cmdName, guildID, sendResponse) {
+		return
 	}
+
+	if fleet.HandleCommand(s, i, cmdName, guildID, sendResponse) {
+		return
+	}
+
+	// -----------------------------------------------------------------------
 
 	switch cmdName {
 	case "dashboard":
