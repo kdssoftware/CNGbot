@@ -33,6 +33,12 @@ func Commands() []*discordgo.ApplicationCommand {
 							Description: "The ship flown",
 							Required:    true,
 						},
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "hole",
+							Description: "The wormhole in which the pilot has its ship",
+							Required:    true,
+						},
 					},
 				},
 				{
@@ -46,12 +52,26 @@ func Commands() []*discordgo.ApplicationCommand {
 							Description: "The name of the pilot",
 							Required:    true,
 						},
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "hole",
+							Description: "The wormhole from which we removed the pilot",
+							Required:    true,
+						},
 					},
 				},
 				{
 					Name:        "ping",
-					Description: "Delete an existing fleet template",
+					Description: "Pings the pilots of chosen hole",
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Options: []*discordgo.ApplicationCommandOption{
+						{
+							Type:        discordgo.ApplicationCommandOptionString,
+							Name:        "hole",
+							Description: "The wormhole to ping",
+							Required:    true,
+						},
+					},
 				},
 				{
 					Name:        "list_all",
@@ -81,11 +101,13 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 	case "add":
 		var user *discordgo.User
 		var shipType string
+		var holeName string
 
 		// Extract the options safely
 		for _, opt := range subCommand.Options {
 			if opt.Name == "user" {
 				user = opt.UserValue(s)
+				continue
 			}
 			if opt.Name == "ship" {
 				if val, ok := opt.Value.(string); ok {
@@ -93,6 +115,15 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 				} else {
 					shipType = opt.StringValue()
 				}
+				continue
+			}
+			if opt.Name == "hole" {
+				if val, ok := opt.Value.(string); ok {
+					holeName = val
+				} else {
+					holeName = opt.StringValue()
+				}
+				continue
 			}
 		}
 
@@ -106,22 +137,36 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 			pilotName = user.GlobalName
 		}
 
+		if len(holeName) == 0 || holeName == "" {
+			sendResponse(s, i.Interaction, "Error: The wormhole in which the pilot has its ship is missing.")
+		}
+
 		// The DB's JOINs will attempt to resolve the Discord ID automatically if the pilot links their auth later.
-		err := db.AddCapitalPilot(guildID, pilotName, 0, user.ID, shipType)
+		err := db.AddCapitalPilot(guildID, pilotName, 0, user.ID, shipType, holeName)
 		if err != nil {
 			sendResponse(s, i.Interaction, fmt.Sprintf("Failed to add pilot: %v", err))
 			return true
 		}
 
-		sendResponse(s, i.Interaction, fmt.Sprintf("Capital pilot <@%s> flying a **%s** has been added.", user.ID, shipType))
+		sendResponse(s, i.Interaction, fmt.Sprintf("Capital pilot <@%s> flying a **%s** in **%s** has been added.", user.ID, shipType, holeName))
 		return true
 
 	case "remove":
 		var user *discordgo.User
+		var holeName string
 
 		for _, opt := range subCommand.Options {
 			if opt.Name == "user" {
 				user = opt.UserValue(s)
+				continue
+			}
+			if opt.Name == "hole" {
+				if val, ok := opt.Value.(string); ok {
+					holeName = val
+				} else {
+					holeName = opt.StringValue()
+				}
+				continue
 			}
 		}
 
@@ -135,17 +180,38 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 			pilotName = user.GlobalName
 		}
 
-		err := db.RemoveCapitalPilot(guildID, pilotName)
+		if len(holeName) == 0 || holeName == "" {
+			sendResponse(s, i.Interaction, "Error: The wormhole in which the pilot has its ship is missing.")
+		}
+
+		err := db.RemoveCapitalPilot(guildID, pilotName, holeName)
 		if err != nil {
 			sendResponse(s, i.Interaction, fmt.Sprintf("Failed to remove pilot: %v", err))
 			return true
 		}
 
-		sendResponse(s, i.Interaction, fmt.Sprintf("Capital pilot <@%s> has been removed.", user.ID))
+		sendResponse(s, i.Interaction, fmt.Sprintf("Capital pilot <@%s> has been removed from **%s** hole.", user.ID, holeName))
 		return true
 
 	case "ping":
-		pilots, err := db.GetActiveCapitalPilots(guildID)
+		var holeName string
+
+		for _, opt := range subCommand.Options {
+			if opt.Name == "hole" {
+				if val, ok := opt.Value.(string); ok {
+					holeName = val
+				} else {
+					holeName = opt.StringValue()
+				}
+				continue
+			}
+		}
+
+		if len(holeName) == 0 || holeName == "" {
+			sendResponse(s, i.Interaction, "Error: The wormhole in which the pilot has its ship is missing.")
+		}
+
+		pilots, err := db.GetActiveCapitalPilots(guildID, holeName)
 		if err != nil {
 			sendResponse(s, i.Interaction, fmt.Sprintf("Failed to fetch capital pilots: %v", err))
 			return true
@@ -165,7 +231,7 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 			}
 		}
 
-		sendResponse(s, i.Interaction, fmt.Sprintf("**Pinging all Capital Pilots:**\n\n%s", pings.String()))
+		sendResponse(s, i.Interaction, fmt.Sprintf("**Pinging all Capital Pilots from** ***%s*** **hole:**\n\n%s", holeName, pings.String()))
 		return true
 
 	case "list_all":
@@ -193,7 +259,7 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 				mention = fmt.Sprintf("<@%s>", p.DiscordID)
 			}
 
-			line := fmt.Sprintf("%s %s - **%s**\n", status, mention, p.ShipName)
+			line := fmt.Sprintf("%s %s - **%s** in **%s**\n", status, mention, p.ShipName, p.HoleName)
 
 			if p.IsActive {
 				activeList += line
