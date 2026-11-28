@@ -491,6 +491,37 @@ func handleModalAddWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
+func resolveSingleWingIndex(wings []WingTemplate) (int, bool) {
+	if len(wings) == 1 {
+		return 0, true
+	}
+	return -1, false
+}
+
+func buildAddSquadModal(wingIndex string) *discordgo.InteractionResponse {
+	return &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseModal,
+		Data: &discordgo.InteractionResponseData{
+			CustomID: "modal_draft_add_squad_" + wingIndex,
+			Title:    "Add New Squad",
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.TextInput{
+							CustomID:    "input_squad_name",
+							Label:       "Squad Name (max 10 chars)",
+							Style:       discordgo.TextInputShort,
+							Placeholder: "e.g., Logi 1, Tackle",
+							Required:    true,
+							MaxLength:   MaxFleetNodeNameLen,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func handleDraftPromptSquadWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	userID := i.Member.User.ID
 
@@ -504,7 +535,13 @@ func handleDraftPromptSquadWing(s *discordgo.Session, i *discordgo.InteractionCr
 
 	// Handle expired session or no wings created yet
 	if !exists {
-		editInteraction(s, i.Interaction, "Your draft session expired. Please start over.")
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Your draft session expired. Please start over.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
 		return
 	}
 	if len(wings) == 0 {
@@ -515,6 +552,12 @@ func handleDraftPromptSquadWing(s *discordgo.Session, i *discordgo.InteractionCr
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
+		return
+	}
+
+	// Skip wing selection when there is only 1 wing in the template
+	if singleIdx, ok := resolveSingleWingIndex(wings); ok {
+		_ = s.InteractionRespond(i.Interaction, buildAddSquadModal(strconv.Itoa(singleIdx)))
 		return
 	}
 
@@ -563,27 +606,7 @@ func handleDraftPromptSquadName(s *discordgo.Session, i *discordgo.InteractionCr
 	}
 	wingIndex := data.Values[0]
 
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseModal,
-		Data: &discordgo.InteractionResponseData{
-			CustomID: "modal_draft_add_squad_" + wingIndex,
-			Title:    "Add New Squad",
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "input_squad_name",
-							Label:       "Squad Name (max 10 chars)",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "e.g., Logi 1, Tackle",
-							Required:    true,
-							MaxLength:   MaxFleetNodeNameLen,
-						},
-					},
-				},
-			},
-		},
-	})
+	_ = s.InteractionRespond(i.Interaction, buildAddSquadModal(wingIndex))
 }
 
 func handleModalAddSquad(s *discordgo.Session, i *discordgo.InteractionCreate) {

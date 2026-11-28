@@ -12,6 +12,7 @@ import (
 	"evemaildiscord/db"
 	"evemaildiscord/esi"
 
+	"github.com/bwmarrin/discordgo"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -507,5 +508,33 @@ func TestFleetTemplateValidateAndSave(t *testing.T) {
 				t.Fatalf("expected SaveFleetTemplate to reject %s, got nil", tc.name)
 			}
 		})
+	}
+}
+
+func TestAddSquadSingleWingShortcut(t *testing.T) {
+	if idx, ok := resolveSingleWingIndex(nil); ok || idx != -1 {
+		t.Fatalf("expected no single wing for empty slice, got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := resolveSingleWingIndex([]WingTemplate{{Name: "Main"}}); !ok || idx != 0 {
+		t.Fatalf("expected index 0 for single wing, got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := resolveSingleWingIndex([]WingTemplate{{Name: "Main"}, {Name: "Logi"}}); ok || idx != -1 {
+		t.Fatalf("expected no single wing for multiple wings, got idx=%d ok=%v", idx, ok)
+	}
+
+	modal := buildAddSquadModal("0")
+	if modal.Type != discordgo.InteractionResponseModal {
+		t.Fatalf("expected modal response type, got %v", modal.Type)
+	}
+	if modal.Data.CustomID != "modal_draft_add_squad_0" {
+		t.Fatalf("expected CustomID modal_draft_add_squad_0, got %q", modal.Data.CustomID)
+	}
+	row, ok := modal.Data.Components[0].(discordgo.ActionsRow)
+	if !ok || len(row.Components) != 1 {
+		t.Fatalf("expected single text input in modal row, got %+v", modal.Data.Components)
+	}
+	input, ok := row.Components[0].(discordgo.TextInput)
+	if !ok || input.MaxLength != MaxFleetNodeNameLen {
+		t.Fatalf("expected TextInput with MaxLength %d, got %+v", MaxFleetNodeNameLen, row.Components[0])
 	}
 }
