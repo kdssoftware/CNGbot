@@ -177,6 +177,78 @@ func TestHandleEveLogin_CharacterMode(t *testing.T) {
 	}
 }
 
+func TestBuildCharacterLinkURL_And_LinkTicket(t *testing.T) {
+	t.Setenv("EVE_CLIENT_ID", "test_eve_client_id")
+	t.Setenv("DASHBOARD_URL", "https://bot.example.com")
+
+	handler := NewWebHandler(nil)
+
+	linkURL := BuildCharacterLinkURL("guild_100", "discord_u1")
+	parsed, err := url.Parse(linkURL)
+	if err != nil {
+		t.Fatalf("failed to parse link URL %q: %v", linkURL, err)
+	}
+	if parsed.Query().Get("guild_id") != "guild_100" || parsed.Query().Get("mode") != "character" {
+		t.Fatalf("unexpected query params in %q", linkURL)
+	}
+	ticket := parsed.Query().Get("link_token")
+	if ticket == "" {
+		t.Fatalf("expected non-empty link_token in %q", linkURL)
+	}
+
+	// Valid link_token binds DiscordUserID in OAuthStateData and stays reusable within TTL.
+	for attempt := 0; attempt < 2; attempt++ {
+		req := httptest.NewRequest("GET", parsed.RequestURI(), nil)
+		w := httptest.NewRecorder()
+		handler.HandleEveLogin(w, req)
+
+		if w.Code != http.StatusSeeOther {
+			t.Fatalf("attempt %d: expected 303 redirect, got %d", attempt, w.Code)
+		}
+		loc, err := url.Parse(w.Header().Get("Location"))
+		if err != nil {
+			t.Fatalf("bad redirect location: %v", err)
+		}
+		stateData, ok := Store.oauthStates[loc.Query().Get("state")]
+		if !ok || stateData.DiscordUserID != "discord_u1" || stateData.Mode != "character" {
+			t.Fatalf("attempt %d: unexpected oauth state: %+v", attempt, stateData)
+		}
+	}
+
+	// Ticket for guild_100 must be rejected when presented for a different guild.
+	reqWrongGuild := httptest.NewRequest("GET", "/auth/eve/login?guild_id=guild_999&mode=character&link_token="+url.QueryEscape(ticket), nil)
+	wWrongGuild := httptest.NewRecorder()
+	handler.HandleEveLogin(wWrongGuild, reqWrongGuild)
+	if wWrongGuild.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for mismatched guild link_token, got %d", wWrongGuild.Code)
+	}
+
+	// Invalid link_token returns 400 Bad Request.
+	reqBad := httptest.NewRequest("GET", "/auth/eve/login?guild_id=guild_100&mode=character&link_token=invalid", nil)
+	wBad := httptest.NewRecorder()
+	handler.HandleEveLogin(wBad, reqBad)
+	if wBad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid link_token, got %d", wBad.Code)
+	}
+
+	// Character mode with a dashboard session cookie (no link_token) binds session.UserID.
+	sess, err := Store.CreateSession("discord_u2", "DashUser", "av", "tok", nil)
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+	reqSess := httptest.NewRequest("GET", "/auth/eve/login?guild_id=guild_100&mode=character", nil)
+	reqSess.AddCookie(&http.Cookie{Name: SessionCookieName, Value: sess.ID})
+	wSess := httptest.NewRecorder()
+	handler.HandleEveLogin(wSess, reqSess)
+	if wSess.Code != http.StatusSeeOther {
+		t.Fatalf("expected 303 redirect for session character mode, got %d", wSess.Code)
+	}
+	locSess, _ := url.Parse(wSess.Header().Get("Location"))
+	if sd := Store.oauthStates[locSess.Query().Get("state")]; sd.DiscordUserID != "discord_u2" {
+		t.Fatalf("expected DiscordUserID=discord_u2 from session, got %+v", sd)
+	}
+}
+
 func TestCharacterInAlliance(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var ids []int

@@ -3,7 +3,6 @@ package fleet
 import (
 	"encoding/json"
 	"evemaildiscord/db"
-	"evemaildiscord/esi"
 	"fmt"
 	"strings"
 
@@ -66,9 +65,8 @@ func Commands() []*discordgo.ApplicationCommand {
 			},
 		},
 		{
-			Name:                     "fleet_build",
-			Description:              "Structure your current EVE fleet based on a template (FC/WC only)",
-			DefaultMemberPermissions: func(p int64) *int64 { return &p }(discordgo.PermissionManageChannels),
+			Name:        "fleet_build",
+			Description: "Structure your current EVE fleet based on a template",
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionString,
@@ -200,6 +198,8 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 			}
 		}
 
+		discordUserID := interactionUserID(i)
+
 		db.ExecuteOrQueue(s, i.ChannelID, func() error {
 			tpl, err := GetFleetTemplate(guildID, requestedName)
 			if err != nil {
@@ -207,38 +207,27 @@ func HandleCommand(s *discordgo.Session, i *discordgo.InteractionCreate, cmdName
 				return nil
 			}
 
-			integ, err := db.GetGuildIntegration(guildID)
-			if err != nil || integ.EveCharacterID <= 0 {
-				sendResponse(s, i.Interaction, "No EVE character linked for this server. Use /link first.")
-				return nil
-			}
-			client := esi.GetOAuthHTTPClient(guildID)
-			if client == nil {
-				sendResponse(s, i.Interaction, "Failed to authenticate with EVE SSO. Try re-linking.")
-				return nil
-			}
-
-			fleet, _, err := GetOwnFleet(client, integ.EveCharacterID)
-			if err != nil {
-				return err
-			}
-			if fleet.FleetID == 0 {
-				sendResponse(s, i.Interaction, "You must be in a fleet to use this command.")
-				return nil
-			}
-			if fleet.FleetBossID != int64(integ.EveCharacterID) {
-				sendResponse(s, i.Interaction, "You must be the Fleet Boss to structure the fleet.")
+			client, fleet, prompt := resolveUserFleetBoss(guildID, discordUserID, fleetBuilderScopes)
+			if prompt != "" {
+				sendResponse(s, i.Interaction, prompt)
 				return nil
 			}
 
 			sendResponse(s, i.Interaction, fmt.Sprintf("Building fleet structure using template: **%s**. Please wait...", tpl.Name))
 
-			sendResponse(s, i.Interaction, "Sweeping members into the first squad...")
 			if err := MoveMembersToFirstSquad(client, fleet); err != nil {
+				if isForbiddenError(err) {
+					sendResponse(s, i.Interaction, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token is missing required fleet permissions (ESI returned 403)."))
+					return nil
+				}
 				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("⚠️ Members moved with errors: %v", err))
 			}
 
 			if err := BuildFleetFromTemplate(client, fleet.FleetID, tpl); err != nil {
+				if isForbiddenError(err) {
+					sendResponse(s, i.Interaction, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token is missing required fleet permissions (ESI returned 403)."))
+					return nil
+				}
 				_, _ = s.ChannelMessageSend(i.ChannelID, fmt.Sprintf("⚠️ Warning: Fleet build encountered an error: %v", err))
 				return nil
 			}

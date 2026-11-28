@@ -11,7 +11,6 @@ import (
 
 	"evemaildiscord/db"
 	"evemaildiscord/discordUI"
-	"evemaildiscord/esi"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -252,40 +251,34 @@ func handleBuildFleet(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 
 	guildID := i.GuildID
+	discordUserID := interactionUserID(i)
+
 	tpl, err := GetFleetTemplate(guildID, templateName)
 	if err != nil {
 		editInteraction(s, i.Interaction, "Template error: "+err.Error())
 		return
 	}
 
-	integ, err := db.GetGuildIntegration(guildID)
-	if err != nil || integ.EveCharacterID <= 0 {
-		editInteraction(s, i.Interaction, "No EVE character linked for this server. Use /link first.")
-		return
-	}
-
-	client := esi.GetOAuthHTTPClient(guildID)
-	if client == nil {
-		editInteraction(s, i.Interaction, "Failed to authenticate with EVE SSO. Try re-linking.")
-		return
-	}
-
-	fleet, _, err := GetOwnFleet(client, integ.EveCharacterID)
-	if err != nil || fleet.FleetID == 0 {
-		editInteraction(s, i.Interaction, "You must be in an active EVE fleet to use this command.")
-		return
-	}
-	if fleet.FleetBossID != int64(integ.EveCharacterID) {
-		editInteraction(s, i.Interaction, "You must be the Fleet Boss in-game.")
+	client, fleet, prompt := resolveUserFleetBoss(guildID, discordUserID, fleetBuilderScopes)
+	if prompt != "" {
+		editInteraction(s, i.Interaction, prompt)
 		return
 	}
 
 	if err := MoveMembersToFirstSquad(client, fleet); err != nil {
-		editInteraction(s, i.Interaction, fmt.Sprintf("⚠️ Fleet built, but member sweep encountered an error: %v", err))
+		if isForbiddenError(err) {
+			editInteraction(s, i.Interaction, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token is missing required fleet permissions (ESI returned 403)."))
+			return
+		}
+		editInteraction(s, i.Interaction, fmt.Sprintf("⚠️ Member sweep encountered an error: %v", err))
 		return
 	}
 
 	if err := BuildFleetFromTemplate(client, fleet.FleetID, tpl); err != nil {
+		if isForbiddenError(err) {
+			editInteraction(s, i.Interaction, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token is missing required fleet permissions (ESI returned 403)."))
+			return
+		}
 		editInteraction(s, i.Interaction, fmt.Sprintf("⚠️ Warning: Fleet build encountered an error: %v", err))
 		return
 	}

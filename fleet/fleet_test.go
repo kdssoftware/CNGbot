@@ -1,11 +1,18 @@
 package fleet
 
 import (
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"evemaildiscord/db"
+	"evemaildiscord/esi"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func TestIsJSpace(t *testing.T) {
@@ -237,4 +244,184 @@ func TestFetchESILocation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setupFleetTestDB(t *testing.T) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "fleet_test.db")
+	database, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	_, err = database.Exec(`
+		CREATE TABLE character_tokens (
+			eve_character_id INTEGER PRIMARY KEY,
+			refresh_token TEXT NOT NULL DEFAULT '',
+			guild_id TEXT NOT NULL DEFAULT '',
+			discord_user_id TEXT NOT NULL DEFAULT '',
+			linked_at DATETIME
+		);
+		CREATE TABLE character_to_discord (
+			eve_id INTEGER PRIMARY KEY,
+			discord_id TEXT
+		);
+	`)
+	if err != nil {
+		t.Fatalf("failed to init test schema: %v", err)
+	}
+
+	oldDB := db.DB
+	db.DB = database
+	t.Cleanup(func() { db.DB = oldDB })
+}
+
+func TestResolveUserFleetBoss(t *testing.T) {
+	t.Setenv("DASHBOARD_URL", "https://bot.example.com")
+
+	t.Run("no linked characters prompts /link", func(t *testing.T) {
+		setupFleetTestDB(t)
+
+		client, fl, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if client != nil || fl.FleetID != 0 {
+			t.Fatalf("expected no fleet client, got client=%v fleet=%+v", client, fl)
+		}
+		if !strings.Contains(prompt, "/auth/eve/login") || !strings.Contains(prompt, "link_token=") {
+			t.Fatalf("expected /link URL in prompt, got: %s", prompt)
+		}
+	})
+
+	t.Run("missing scope prompts /link with missing scope name", func(t *testing.T) {
+		setupFleetTestDB(t)
+		if err := db.SetCharacterToken(1001, "tok_missing_write", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert token: %v", err)
+		}
+
+		origOAuth := oauthClientForScopes
+		oauthClientForScopes = func(refreshToken string, requiredScopes ...string) (*http.Client, error) {
+			return nil, &esi.MissingScopesError{Missing: []string{"esi-fleets.write_fleet.v1"}}
+		}
+		defer func() { oauthClientForScopes = origOAuth }()
+
+		client, _, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if client != nil {
+			t.Fatalf("expected nil client")
+		}
+		if !strings.Contains(prompt, "esi-fleets.write_fleet.v1") || !strings.Contains(prompt, "/auth/eve/login") {
+			t.Fatalf("expected missing scope and /link URL in prompt, got: %s", prompt)
+		}
+	})
+
+	t.Run("selects fleet boss alt when another alt lacks scope or fleet", func(t *testing.T) {
+		setupFleetTestDB(t)
+		if err := db.SetCharacterToken(1001, "tok_alt1_missing", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert alt 1: %v", err)
+		}
+		if err := db.SetCharacterToken(1002, "tok_alt2_boss", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert alt 2: %v", err)
+		}
+
+		esiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/characters/1002/fleet/" {
+				_, _ = w.Write([]byte(`{"fleet_id":555,"fleet_boss_id":1002,"role":"fleet_commander"}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer esiSrv.Close()
+
+		origBase := esiBase
+		esiBase = esiSrv.URL
+		defer func() { esiBase = origBase }()
+
+		origOAuth := oauthClientForScopes
+		oauthClientForScopes = func(refreshToken string, requiredScopes ...string) (*http.Client, error) {
+			if refreshToken == "tok_alt1_missing" {
+				return nil, &esi.MissingScopesError{Missing: []string{"esi-fleets.write_fleet.v1"}}
+			}
+			return esiSrv.Client(), nil
+		}
+		defer func() { oauthClientForScopes = origOAuth }()
+
+		client, fl, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if prompt != "" || client == nil || fl.FleetID != 555 || fl.FleetBossID != 1002 {
+			t.Fatalf("expected alt 2 fleet boss, got fl=%+v prompt=%q", fl, prompt)
+		}
+	})
+
+	t.Run("in fleet but not boss returns clear message", func(t *testing.T) {
+		setupFleetTestDB(t)
+		if err := db.SetCharacterToken(1001, "tok_member", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert token: %v", err)
+		}
+
+		esiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"fleet_id":555,"fleet_boss_id":9999,"role":"squad_member"}`))
+		}))
+		defer esiSrv.Close()
+
+		origBase := esiBase
+		esiBase = esiSrv.URL
+		defer func() { esiBase = origBase }()
+
+		origOAuth := oauthClientForScopes
+		oauthClientForScopes = func(refreshToken string, requiredScopes ...string) (*http.Client, error) {
+			return esiSrv.Client(), nil
+		}
+		defer func() { oauthClientForScopes = origOAuth }()
+
+		client, _, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if client != nil || !strings.Contains(prompt, "Fleet Boss") {
+			t.Fatalf("expected Fleet Boss error, got client=%v prompt=%q", client, prompt)
+		}
+	})
+}
+
+func TestFleetBuilder_ForbiddenError(t *testing.T) {
+	t.Run("BuildFleetFromTemplate 403", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"missing scope"}`))
+		}))
+		defer srv.Close()
+
+		origBase := esiBase
+		esiBase = srv.URL
+		defer func() { esiBase = origBase }()
+
+		err := BuildFleetFromTemplate(srv.Client(), 12345, FleetTemplate{
+			Name:  "PVP",
+			Wings: []WingTemplate{{Name: "Main", Squads: []string{"DPS"}}},
+		})
+		if err == nil || !isForbiddenError(err) {
+			t.Fatalf("expected forbidden error, got %v", err)
+		}
+	})
+
+	t.Run("MoveMembersToFirstSquad 403 on move", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/fleets/12345/wings/":
+				_, _ = w.Write([]byte(`[{"id":1,"name":"W1","squads":[{"id":10,"name":"S1"}]}]`))
+			case r.Method == http.MethodGet && r.URL.Path == "/fleets/12345/members/":
+				_, _ = w.Write([]byte(`[{"character_id":200,"role":"squad_member","wing_id":2,"squad_id":20}]`))
+			case r.Method == http.MethodPut:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+
+		origBase := esiBase
+		esiBase = srv.URL
+		defer func() { esiBase = origBase }()
+
+		err := MoveMembersToFirstSquad(srv.Client(), ownFleet{FleetID: 12345, FleetBossID: 100})
+		if err == nil || !isForbiddenError(err) {
+			t.Fatalf("expected forbidden error from MoveMembersToFirstSquad, got %v", err)
+		}
+	})
 }

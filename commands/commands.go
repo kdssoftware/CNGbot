@@ -24,6 +24,7 @@ import (
 	"evemaildiscord/esi"
 	"evemaildiscord/roles"
 	"evemaildiscord/wanderer"
+	"evemaildiscord/web"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -394,7 +395,7 @@ var Commands = []*discordgo.ApplicationCommand{
 	},
 	{
 		Name:        "link",
-		Description: "Get a link to log in your EVE character with the scopes needed for fleet invites",
+		Description: "Get a link to log in your EVE character with the scopes needed for fleet invites and /fleet_build",
 	},
 	{
 		Name:        "set_greeting",
@@ -815,6 +816,15 @@ func isPublicCommand(cmdName, subCmdName string) bool {
 	return false
 }
 
+func usesDiscordIntegrationPermissions(cmdName string) bool {
+	switch cmdName {
+	case "link", "fleet_build":
+		return true
+	default:
+		return false
+	}
+}
+
 func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionApplicationCommand {
 		return
@@ -855,56 +865,58 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		log.Printf("Error deferring interaction: %v", errDefer)
 	}
 
-	// Native Discord Administrator check
-	var hasAdminRole bool
-	if i.Member != nil && (i.Member.Permissions&discordgo.PermissionAdministrator) != 0 {
-		hasAdminRole = true
-	}
+	if !usesDiscordIntegrationPermissions(cmdName) {
+		// Native Discord Administrator check
+		var hasAdminRole bool
+		if i.Member != nil && (i.Member.Permissions&discordgo.PermissionAdministrator) != 0 {
+			hasAdminRole = true
+		}
 
-	// Read mapped admin roles from database
-	var adminRoleCount int
-	errCount := db.DB.QueryRow("SELECT COUNT(*) FROM admin_roles WHERE guild_id = ?", guildID).Scan(&adminRoleCount)
+		// Read mapped admin roles from database
+		var adminRoleCount int
+		errCount := db.DB.QueryRow("SELECT COUNT(*) FROM admin_roles WHERE guild_id = ?", guildID).Scan(&adminRoleCount)
 
-	if !hasAdminRole && errCount == nil && adminRoleCount > 0 {
-		if i.Member != nil {
-			rowsAdmins, errQuery := db.DB.Query("SELECT role_id FROM admin_roles WHERE guild_id = ?", guildID)
-			if errQuery == nil {
-				var adminRolesList []string
-				for rowsAdmins.Next() {
-					var rID string
-					if rowsAdmins.Scan(&rID) == nil {
-						adminRolesList = append(adminRolesList, rID)
+		if !hasAdminRole && errCount == nil && adminRoleCount > 0 {
+			if i.Member != nil {
+				rowsAdmins, errQuery := db.DB.Query("SELECT role_id FROM admin_roles WHERE guild_id = ?", guildID)
+				if errQuery == nil {
+					var adminRolesList []string
+					for rowsAdmins.Next() {
+						var rID string
+						if rowsAdmins.Scan(&rID) == nil {
+							adminRolesList = append(adminRolesList, rID)
+						}
 					}
-				}
-				_ = rowsAdmins.Close()
+					_ = rowsAdmins.Close()
 
-				for _, rID := range adminRolesList {
-					if roles.HasRole(i.Member.Roles, rID) {
-						hasAdminRole = true
-						break
+					for _, rID := range adminRolesList {
+						if roles.HasRole(i.Member.Roles, rID) {
+							hasAdminRole = true
+							break
+						}
 					}
 				}
 			}
+		} else if adminRoleCount == 0 {
+			// If NO admin roles are mapped, /map_admin and /dashboard are allowed
+			if cmdName != "map_admin" && cmdName != "dashboard" && !hasAdminRole {
+				warningMsg := fmt.Sprintf("Command ignored: User <@%s> tried to execute command `/%s`, but no admin roles are mapped yet. Only `/map_admin` and `/dashboard` are allowed right now.", userID, cmdName)
+				db.DiscordLog(s, guildID, warningMsg)
+				sendResponse(s, i.Interaction, "No admin roles are mapped yet. Only `/map_admin` and `/dashboard` are allowed right now.")
+				return
+			}
+			hasAdminRole = true
 		}
-	} else if adminRoleCount == 0 {
-		// If NO admin roles are mapped, /map_admin and /dashboard are allowed
-		if cmdName != "map_admin" && cmdName != "dashboard" && !hasAdminRole {
-			warningMsg := fmt.Sprintf("Command ignored: User <@%s> tried to execute command `/%s`, but no admin roles are mapped yet. Only `/map_admin` and `/dashboard` are allowed right now.", userID, cmdName)
-			db.DiscordLog(s, guildID, warningMsg)
-			sendResponse(s, i.Interaction, "No admin roles are mapped yet. Only `/map_admin` and `/dashboard` are allowed right now.")
+
+		// Enforce admin permission lock for mapped admins
+		if !hasAdminRole {
+			if adminRoleCount > 0 {
+				warningMsg := fmt.Sprintf("Security Warning: User <@%s> tried to execute command `/%s` but is not in an Admin role. Command ignored.", userID, cmdName)
+				db.DiscordLog(s, guildID, warningMsg)
+			}
+			sendResponse(s, i.Interaction, "You do not have permission to execute bot commands.")
 			return
 		}
-		hasAdminRole = true
-	}
-
-	// Enforce admin permission lock for mapped admins
-	if !hasAdminRole {
-		if adminRoleCount > 0 {
-			warningMsg := fmt.Sprintf("Security Warning: User <@%s> tried to execute command `/%s` but is not in an Admin role. Command ignored.", userID, cmdName)
-			db.DiscordLog(s, guildID, warningMsg)
-		}
-		sendResponse(s, i.Interaction, "You do not have permission to execute bot commands.")
-		return
 	}
 
 	// -----------------------------------------------------------------------
@@ -2285,8 +2297,8 @@ func InteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		})
 
 	case "link":
-		link := fmt.Sprintf("%s/auth/eve/login?guild_id=%s&mode=character", config.GetDashboardURL(), i.GuildID)
-		sendResponse(s, i.Interaction, "Log in with your EVE character to enable fleet invites (fleet scopes): "+link)
+		link := web.BuildCharacterLinkURL(i.GuildID, userID)
+		sendResponse(s, i.Interaction, "Log in with your EVE character to enable fleet invites and `/fleet_build`: "+link)
 
 	case "set_log_channel":
 		chanOpt := getOption(data.Options, "channel")
