@@ -267,6 +267,12 @@ func setupFleetTestDB(t *testing.T) {
 			eve_id INTEGER PRIMARY KEY,
 			discord_id TEXT
 		);
+		CREATE TABLE config (
+			guild_id TEXT NOT NULL DEFAULT '',
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			PRIMARY KEY (guild_id, key)
+		);
 	`)
 	if err != nil {
 		t.Fatalf("failed to init test schema: %v", err)
@@ -424,4 +430,82 @@ func TestFleetBuilder_ForbiddenError(t *testing.T) {
 			t.Fatalf("expected forbidden error from MoveMembersToFirstSquad, got %v", err)
 		}
 	})
+}
+
+func TestFleetTemplateValidateAndSave(t *testing.T) {
+	setupFleetTestDB(t)
+
+	valid := FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "1234567890", Squads: []string{"1234567890", "Logi"}},
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected 10-char names to be valid, got: %v", err)
+	}
+	if err := SaveFleetTemplate("g1", valid); err != nil {
+		t.Fatalf("expected SaveFleetTemplate to succeed for valid template, got: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		tpl  FleetTemplate
+	}{
+		{
+			name: "wing name over 10 chars",
+			tpl: FleetTemplate{
+				Name:  "BadWing",
+				Wings: []WingTemplate{{Name: "12345678901", Squads: []string{"DPS"}}},
+			},
+		},
+		{
+			name: "squad name over 10 chars",
+			tpl: FleetTemplate{
+				Name:  "BadSquad",
+				Wings: []WingTemplate{{Name: "Main", Squads: []string{"12345678901"}}},
+			},
+		},
+		{
+			name: "empty wing name",
+			tpl: FleetTemplate{
+				Name:  "EmptyWing",
+				Wings: []WingTemplate{{Name: "   ", Squads: []string{"DPS"}}},
+			},
+		},
+		{
+			name: "empty squad name",
+			tpl: FleetTemplate{
+				Name:  "EmptySquad",
+				Wings: []WingTemplate{{Name: "Main", Squads: []string{""}}},
+			},
+		},
+		{
+			name: "too many wings",
+			tpl: FleetTemplate{
+				Name: "SixWings",
+				Wings: []WingTemplate{
+					{Name: "W1"}, {Name: "W2"}, {Name: "W3"}, {Name: "W4"}, {Name: "W5"}, {Name: "W6"},
+				},
+			},
+		},
+		{
+			name: "too many squads",
+			tpl: FleetTemplate{
+				Name:  "SixSquads",
+				Wings: []WingTemplate{{Name: "W1", Squads: []string{"S1", "S2", "S3", "S4", "S5", "S6"}}},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.tpl.Validate(); err == nil {
+				t.Fatalf("expected validation error for %s, got nil", tc.name)
+			}
+			if err := SaveFleetTemplate("g1", tc.tpl); err == nil {
+				t.Fatalf("expected SaveFleetTemplate to reject %s, got nil", tc.name)
+			}
+		})
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"evemaildiscord/db"
 	"evemaildiscord/discordUI"
@@ -414,11 +415,11 @@ func handleDraftAddWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					Components: []discordgo.MessageComponent{
 						discordgo.TextInput{
 							CustomID:    "input_wing_name",
-							Label:       "Wing Name",
+							Label:       "Wing Name (max 10 chars)",
 							Style:       discordgo.TextInputShort,
-							Placeholder: "e.g., DPS, Logi, Scouts",
+							Placeholder: "e.g., DPS, Logi",
 							Required:    true,
-							MaxLength:   20,
+							MaxLength:   MaxFleetNodeNameLen,
 						},
 					},
 				},
@@ -440,8 +441,19 @@ func handleModalAddWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	wingName = strings.TrimSpace(wingName)
 	if wingName == "" {
-		wingName = "Unnamed Wing"
+		wingName = "Wing"
+	}
+	if utf8.RuneCountInString(wingName) > MaxFleetNodeNameLen {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("⚠️ Wing name cannot exceed %d characters.", MaxFleetNodeNameLen),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
 	}
 
 	userID := i.Member.User.ID
@@ -561,11 +573,11 @@ func handleDraftPromptSquadName(s *discordgo.Session, i *discordgo.InteractionCr
 					Components: []discordgo.MessageComponent{
 						discordgo.TextInput{
 							CustomID:    "input_squad_name",
-							Label:       "Squad Name",
+							Label:       "Squad Name (max 10 chars)",
 							Style:       discordgo.TextInputShort,
-							Placeholder: "e.g., Logi 1, Tackle, Snipers",
+							Placeholder: "e.g., Logi 1, Tackle",
 							Required:    true,
-							MaxLength:   20,
+							MaxLength:   MaxFleetNodeNameLen,
 						},
 					},
 				},
@@ -593,8 +605,19 @@ func handleModalAddSquad(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	squadName = strings.TrimSpace(squadName)
 	if squadName == "" {
-		squadName = "Unnamed Squad"
+		squadName = "Squad"
+	}
+	if utf8.RuneCountInString(squadName) > MaxFleetNodeNameLen {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("⚠️ Squad name cannot exceed %d characters.", MaxFleetNodeNameLen),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
 	}
 
 	userID := i.Member.User.ID
