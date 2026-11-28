@@ -538,3 +538,151 @@ func TestAddSquadSingleWingShortcut(t *testing.T) {
 		t.Fatalf("expected TextInput with MaxLength %d, got %+v", MaxFleetNodeNameLen, row.Components[0])
 	}
 }
+
+func TestCloneFleetTemplate(t *testing.T) {
+	orig := FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "Main", Squads: []string{"DPS", "Logi"}},
+		},
+	}
+
+	cloned := cloneFleetTemplate(orig)
+	cloned.Wings[0].Name = "Changed"
+	cloned.Wings[0].Squads[0] = "Tackle"
+
+	if orig.Wings[0].Name != "Main" || orig.Wings[0].Squads[0] != "DPS" {
+		t.Fatalf("mutating clone affected original template: %+v", orig)
+	}
+}
+
+func TestRenameDraftItem(t *testing.T) {
+	draft := &FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "Main", Squads: []string{"DPS", "Logi"}},
+		},
+	}
+
+	if err := renameDraftItem(draft, "wing_0", "  Brawl  "); err != nil {
+		t.Fatalf("expected wing rename to succeed, got %v", err)
+	}
+	if draft.Wings[0].Name != "Brawl" {
+		t.Fatalf("expected wing name Brawl, got %q", draft.Wings[0].Name)
+	}
+
+	if err := renameDraftItem(draft, "squad_0_1", "Logi 1"); err != nil {
+		t.Fatalf("expected squad rename to succeed, got %v", err)
+	}
+	if draft.Wings[0].Squads[1] != "Logi 1" {
+		t.Fatalf("expected squad name Logi 1, got %q", draft.Wings[0].Squads[1])
+	}
+
+	for _, tc := range []struct {
+		name    string
+		target  string
+		newName string
+	}{
+		{"wing over 10 chars", "wing_0", "12345678901"},
+		{"squad over 10 chars", "squad_0_0", "12345678901"},
+		{"empty name", "wing_0", "   "},
+		{"wing out of range", "wing_5", "Valid"},
+		{"squad out of range", "squad_0_5", "Valid"},
+		{"unknown target", "fleet_0", "Valid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := renameDraftItem(draft, tc.target, tc.newName); err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestBuildPanelComponents_UpdateButton(t *testing.T) {
+	setupFleetTestDB(t)
+
+	// Empty DB -> Update Template button exists and is disabled.
+	emptyComps, err := buildPanelComponents("g1")
+	if err != nil {
+		t.Fatalf("buildPanelComponents failed on empty db: %v", err)
+	}
+	btnRow := emptyComps[1].(discordgo.ActionsRow)
+	var foundEdit *discordgo.Button
+	for _, c := range btnRow.Components {
+		if b, ok := c.(discordgo.Button); ok && strings.HasPrefix(b.CustomID, "btn_edit_fleet_") {
+			bCopy := b
+			foundEdit = &bCopy
+		}
+	}
+	if foundEdit == nil || !foundEdit.Disabled || foundEdit.CustomID != "btn_edit_fleet_none" {
+		t.Fatalf("expected disabled btn_edit_fleet_none when no templates exist, got %+v", foundEdit)
+	}
+
+	// With saved template -> Update Template button is enabled and targets the template.
+	if err := SaveFleetTemplate("g1", FleetTemplate{
+		Name:  "pvp",
+		Wings: []WingTemplate{{Name: "Main", Squads: []string{"DPS"}}},
+	}); err != nil {
+		t.Fatalf("failed to save template: %v", err)
+	}
+
+	comps, err := buildPanelComponents("g1")
+	if err != nil {
+		t.Fatalf("buildPanelComponents failed: %v", err)
+	}
+	btnRow = comps[1].(discordgo.ActionsRow)
+	foundEdit = nil
+	for _, c := range btnRow.Components {
+		if b, ok := c.(discordgo.Button); ok && strings.HasPrefix(b.CustomID, "btn_edit_fleet_") {
+			bCopy := b
+			foundEdit = &bCopy
+		}
+	}
+	if foundEdit == nil || foundEdit.Disabled || foundEdit.CustomID != "btn_edit_fleet_pvp" {
+		t.Fatalf("expected enabled btn_edit_fleet_pvp, got %+v", foundEdit)
+	}
+}
+
+func TestUpdateTemplateRoundtrip(t *testing.T) {
+	setupFleetTestDB(t)
+
+	initial := FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "Main", Squads: []string{"DPS", "OldSquad"}},
+		},
+	}
+	if err := SaveFleetTemplate("g1", initial); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+
+	loaded, err := GetFleetTemplate("g1", "PVP")
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+
+	draft := cloneFleetTemplate(loaded)
+	// Rename wing & squad, remove one squad, add a new wing + squad
+	if err := renameDraftItem(draft, "wing_0", "Line"); err != nil {
+		t.Fatalf("rename wing failed: %v", err)
+	}
+	if err := renameDraftItem(draft, "squad_0_0", "HeavyDPS"); err != nil {
+		t.Fatalf("rename squad failed: %v", err)
+	}
+	draft.Wings[0].Squads = draft.Wings[0].Squads[:1] // remove OldSquad
+	draft.Wings = append(draft.Wings, WingTemplate{Name: "Support", Squads: []string{"Logi"}})
+
+	if err := SaveFleetTemplate("g1", *draft); err != nil {
+		t.Fatalf("updated save failed: %v", err)
+	}
+
+	updated, err := GetFleetTemplate("g1", "PVP")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(updated.Wings) != 2 ||
+		updated.Wings[0].Name != "Line" || len(updated.Wings[0].Squads) != 1 || updated.Wings[0].Squads[0] != "HeavyDPS" ||
+		updated.Wings[1].Name != "Support" || len(updated.Wings[1].Squads) != 1 || updated.Wings[1].Squads[0] != "Logi" {
+		t.Fatalf("unexpected updated template: %+v", updated)
+	}
+}
