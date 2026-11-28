@@ -213,7 +213,7 @@ func bossCandidateFor(dg *discordgo.Session, guildID string, client *http.Client
 	if err != nil {
 		log.Printf("[Fleet] Guild %s: failed to resolve fleet for character %d: %v", guildID, charID, err)
 		if status == http.StatusForbidden {
-			warnThrottled(dg, guildID, fmt.Sprintf("Auto fleet invite: the ESI token for character %d is missing the esi-fleets scopes. Re-link it via the dashboard (Link EVE Character) to authorize them.", charID))
+			warnThrottled(dg, guildID, fmt.Sprintf("Auto fleet invite: the ESI token for character %d is missing the esi-fleets scopes. Re-link it via /link or the dashboard (Link EVE Character) to authorize them.", charID))
 		}
 		return bossCandidate{}, false
 	}

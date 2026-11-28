@@ -714,7 +714,7 @@ func GetGuildWandererDSN(guildID string) (string, error) {
 }
 
 // IsWandererPairSeen reports whether a connection between two systems was
-// already announced for a guild. Endpoints are normalized so (A,B) == (B,A).
+// already announced for a guild. Endpoints are normalised so (A,B) == (B,A).
 func IsWandererPairSeen(guildID string, srcID, dstID int64) (bool, error) {
 	if DB == nil {
 		return false, fmt.Errorf("database not initialized")
@@ -824,7 +824,7 @@ func GetProjectsPostedIDs(guildID, kind string) (map[string]bool, error) {
 	if err != nil {
 		return out, err
 	}
-	for _, id := range strings.Split(raw, ",") {
+	for id := range strings.SplitSeq(raw, ",") {
 		if id != "" {
 			out[id] = true
 		}
@@ -874,6 +874,47 @@ func GetGuildCharacterTokens(guildID string) (map[int]string, error) {
 			return nil, err
 		}
 		tokens[eveID] = token
+	}
+	return tokens, rows.Err()
+}
+
+type CharacterToken struct {
+	EveCharacterID int
+	RefreshToken   string
+	GuildID        string
+	DiscordUserID  string
+}
+
+// GetUserCharacterTokens returns the character-linked ESI refresh tokens for a
+// Discord user, including legacy rows whose discord_user_id is empty
+// when the character is mapped in character_to_discord.
+func GetUserCharacterTokens(guildID, discordUserID string) ([]CharacterToken, error) {
+	if DB == nil {
+		return nil, fmt.Errorf("database not initialized")
+	}
+	if discordUserID == "" {
+		return nil, nil
+	}
+	rows, err := DB.Query(`
+		SELECT ct.eve_character_id, ct.refresh_token, ct.guild_id, ct.discord_user_id
+		FROM character_tokens ct
+		LEFT JOIN character_to_discord ctd ON ct.eve_character_id = ctd.eve_id
+		WHERE ct.guild_id = ?
+		  AND (ct.discord_user_id = ? OR (ct.discord_user_id = '' AND ctd.discord_id = ?))
+		ORDER BY ct.linked_at DESC
+	`, guildID, discordUserID, discordUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var tokens []CharacterToken
+	for rows.Next() {
+		var ct CharacterToken
+		if err := rows.Scan(&ct.EveCharacterID, &ct.RefreshToken, &ct.GuildID, &ct.DiscordUserID); err != nil {
+			return nil, err
+		}
+		tokens = append(tokens, ct)
 	}
 	return tokens, rows.Err()
 }
@@ -1163,7 +1204,7 @@ func AddCapitalPilot(guildID, pilotName string, eveCharacterID int, discordID, s
 }
 
 // RemoveCapitalPilot softly removes a pilot by flagging them as inactive.
-// "Soft delete" in case they rage quit corp and wants to fuck with us
+// "Soft delete" in case they rage-quit corp and wants to fuck with us,
 // we will still have the info they have a capital available
 func RemoveCapitalPilot(guildID, pilotName string) error {
 	if DB == nil {

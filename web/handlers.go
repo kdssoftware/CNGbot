@@ -385,6 +385,21 @@ func (h *WebHandler) HandleGuildConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// BuildCharacterLinkURL returns the /link URL for a guild, binding the caller's
+// Discord user ID via a short-lived server-side link ticket when provided.
+func BuildCharacterLinkURL(guildID, discordUserID string) string {
+	base := fmt.Sprintf("%s/auth/eve/login?guild_id=%s&mode=character", config.GetDashboardURL(), url.QueryEscape(guildID))
+	if discordUserID == "" {
+		return base
+	}
+	ticket, err := Store.CreateLinkTicket(guildID, discordUserID)
+	if err != nil {
+		log.Printf("Failed to create link ticket for guild %s user %s: %v", guildID, discordUserID, err)
+		return base
+	}
+	return base + "&link_token=" + url.QueryEscape(ticket)
+}
+
 func (h *WebHandler) HandleEveLogin(w http.ResponseWriter, r *http.Request) {
 	guildID := r.URL.Query().Get("guild_id")
 	if guildID == "" {
@@ -398,8 +413,10 @@ func (h *WebHandler) HandleEveLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// character mode (the /link flow) is EVE-only: no Discord login required,
-	// the server-side OAuth state binds the request to the guild.
+	// the server-side OAuth state binds the request to the guild (and to the
+	// Discord user when initiated via a /link ticket or dashboard session).
 	stateSessionID := ""
+	discordUserID := ""
 	if mode != "character" {
 		session := Store.GetSession(r)
 		if session == nil {
@@ -411,6 +428,18 @@ func (h *WebHandler) HandleEveLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		stateSessionID = session.ID
+		discordUserID = session.UserID
+	} else {
+		if linkToken := r.URL.Query().Get("link_token"); linkToken != "" {
+			resolvedUserID, ok := Store.ResolveLinkTicket(linkToken, guildID)
+			if !ok {
+				http.Error(w, "Invalid or expired link token. Please run /link in Discord to generate a fresh link.", http.StatusBadRequest)
+				return
+			}
+			discordUserID = resolvedUserID
+		} else if session := Store.GetSession(r); session != nil {
+			discordUserID = session.UserID
+		}
 	}
 
 	clientID := config.GetEveClientID()
@@ -425,7 +454,7 @@ func (h *WebHandler) HandleEveLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	Store.SaveOAuthState(state, stateSessionID, guildID, "eve", mode)
+	Store.SaveOAuthState(state, stateSessionID, guildID, "eve", mode, discordUserID)
 
 	scopes := []string{
 		"esi-mail.read_mail.v1",
@@ -624,7 +653,7 @@ func (h *WebHandler) HandleEveCallback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err = db.SetCharacterToken(charID, tokenResp.RefreshToken, guildID, "")
+		err = db.SetCharacterToken(charID, tokenResp.RefreshToken, guildID, stateData.DiscordUserID)
 		if err != nil {
 			log.Printf("Failed to save EVE character token for character %d (guild %s): %v", charID, guildID, err)
 			http.Error(w, "Failed to save EVE authentication", http.StatusInternalServerError)
@@ -632,11 +661,11 @@ func (h *WebHandler) HandleEveCallback(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if h.dg != nil {
-			db.DiscordLog(h.dg, guildID, fmt.Sprintf("EVE Online Character **%s** (ID: %d) linked for auto fleet invite.", charName, charID))
+			db.DiscordLog(h.dg, guildID, fmt.Sprintf("EVE Online Character **%s** (ID: %d) linked for fleet invites and `/fleet_build`.", charName, charID))
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<html><body><h2>EVE character %s linked.</h2><p>You can close this page. The bot will use this character for auto fleet invite while it is your fleet's boss.</p></body></html>", html.EscapeString(charName))
+		fmt.Fprintf(w, "<html><body><h2>EVE character %s linked.</h2><p>You can close this page. The bot can now use this character for auto fleet invites and /fleet_build while it is your fleet's boss.</p></body></html>", html.EscapeString(charName))
 		return
 	}
 

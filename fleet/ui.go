@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"evemaildiscord/db"
 	"evemaildiscord/discordUI"
-	"evemaildiscord/esi"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -35,11 +35,10 @@ func InitUI() {
 	discordui.RegisterExactMatch("select_fleet_template", handleSelectTemplate)
 	discordui.RegisterPrefixMatch("btn_build_fleet_", handleBuildFleet)
 
-	// Add Create New Template Handle
+	// Add Create / Update / Delete Template Handles
 	discordui.RegisterExactMatch("btn_draft_prompt_name", handleDraftPromptName)
 	discordui.RegisterExactMatch("modal_draft_name", handleDraftInit)
-
-	// Add Delete Template Handle
+	discordui.RegisterPrefixMatch("btn_edit_fleet_", handleUIEditFleet)
 	discordui.RegisterPrefixMatch("btn_delete_fleet_", handleUIDeleteFleet)
 
 	// Add Wing Handle
@@ -51,6 +50,11 @@ func InitUI() {
 	discordui.RegisterExactMatch("select_draft_wing_for_squad", handleDraftPromptSquadName)
 	discordui.RegisterExactMatch("btn_draft_cancel_action", handleDraftRestoreUI)
 	discordui.RegisterPrefixMatch("modal_draft_add_squad_", handleModalAddSquad)
+
+	// Add Rename Item Handle
+	discordui.RegisterExactMatch("btn_draft_rename_item", handleDraftPromptRename)
+	discordui.RegisterExactMatch("select_draft_rename_item", handleDraftPromptRenameModal)
+	discordui.RegisterPrefixMatch("modal_draft_rename_", handleModalRenameItem)
 
 	// Add Remove Item Handle
 	discordui.RegisterExactMatch("btn_draft_remove_item", handleDraftPromptRemove)
@@ -138,6 +142,12 @@ func buildPanelComponents(guildID string) ([]discordgo.MessageComponent, error) 
 					Disabled: len(templates) == 0,
 				},
 				discordgo.Button{
+					Label:    "Update Template",
+					Style:    discordgo.SecondaryButton,
+					CustomID: "btn_edit_fleet_" + initialTemplate,
+					Disabled: len(templates) == 0,
+				},
+				discordgo.Button{
 					Label:    "Create New Template",
 					Style:    discordgo.PrimaryButton,
 					CustomID: "btn_draft_prompt_name",
@@ -214,6 +224,10 @@ func handleSelectTemplate(s *discordgo.Session, i *discordgo.InteractionCreate) 
 					btn.Disabled = false
 					btn.CustomID = "btn_build_fleet_" + selectedTemplate
 					actionRow.Components[cIdx] = btn
+				} else if strings.HasPrefix(btn.CustomID, "btn_edit_fleet_") {
+					btn.Disabled = false
+					btn.CustomID = "btn_edit_fleet_" + selectedTemplate
+					actionRow.Components[cIdx] = btn
 				} else if strings.HasPrefix(btn.CustomID, "btn_delete_fleet_") {
 					btn.Disabled = false
 					btn.CustomID = "btn_delete_fleet_" + selectedTemplate
@@ -252,45 +266,99 @@ func handleBuildFleet(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 
 	guildID := i.GuildID
+	discordUserID := interactionUserID(i)
+
 	tpl, err := GetFleetTemplate(guildID, templateName)
 	if err != nil {
 		editInteraction(s, i.Interaction, "Template error: "+err.Error())
 		return
 	}
 
-	integ, err := db.GetGuildIntegration(guildID)
-	if err != nil || integ.EveCharacterID <= 0 {
-		editInteraction(s, i.Interaction, "No EVE character linked for this server. Use /link first.")
-		return
-	}
-
-	client := esi.GetOAuthHTTPClient(guildID)
-	if client == nil {
-		editInteraction(s, i.Interaction, "Failed to authenticate with EVE SSO. Try re-linking.")
-		return
-	}
-
-	fleet, _, err := GetOwnFleet(client, integ.EveCharacterID)
-	if err != nil || fleet.FleetID == 0 {
-		editInteraction(s, i.Interaction, "You must be in an active EVE fleet to use this command.")
-		return
-	}
-	if fleet.FleetBossID != int64(integ.EveCharacterID) {
-		editInteraction(s, i.Interaction, "You must be the Fleet Boss in-game.")
+	client, fleet, prompt := resolveUserFleetBoss(guildID, discordUserID, fleetBuilderScopes)
+	if prompt != "" {
+		editInteraction(s, i.Interaction, prompt)
 		return
 	}
 
 	if err := MoveMembersToFirstSquad(client, fleet); err != nil {
-		editInteraction(s, i.Interaction, fmt.Sprintf("⚠️ Fleet built, but member sweep encountered an error: %v", err))
+		if isForbiddenError(err) {
+			editInteraction(s, i.Interaction, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token is missing required fleet permissions (ESI returned 403)."))
+			return
+		}
+		editInteraction(s, i.Interaction, fmt.Sprintf("⚠️ Member sweep encountered an error: %v", err))
 		return
 	}
 
 	if err := BuildFleetFromTemplate(client, fleet.FleetID, tpl); err != nil {
+		if isForbiddenError(err) {
+			editInteraction(s, i.Interaction, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token is missing required fleet permissions (ESI returned 403)."))
+			return
+		}
 		editInteraction(s, i.Interaction, fmt.Sprintf("⚠️ Warning: Fleet build encountered an error: %v", err))
 		return
 	}
 
 	editInteraction(s, i.Interaction, fmt.Sprintf("✅ Fleet structure aligned to **%s** successfully.", tpl.Name))
+}
+
+func cloneFleetTemplate(tpl FleetTemplate) *FleetTemplate {
+	cloned := &FleetTemplate{
+		Name:  tpl.Name,
+		Wings: make([]WingTemplate, len(tpl.Wings)),
+	}
+	for i, w := range tpl.Wings {
+		squads := make([]string, len(w.Squads))
+		copy(squads, w.Squads)
+		cloned.Wings[i] = WingTemplate{
+			Name:   w.Name,
+			Squads: squads,
+		}
+	}
+	return cloned
+}
+
+func handleUIEditFleet(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Member == nil || (i.Member.Permissions&(discordgo.PermissionManageChannels|discordgo.PermissionAdministrator)) == 0 {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "You do not have permission to update templates.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	data := i.MessageComponentData()
+	templateName := strings.TrimPrefix(data.CustomID, "btn_edit_fleet_")
+
+	tpl, err := GetFleetTemplate(i.GuildID, templateName)
+	if err != nil {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ Failed to load template: " + err.Error(),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	userID := interactionUserID(i)
+	draft := cloneFleetTemplate(tpl)
+
+	draftMu.Lock()
+	drafts[userID] = draft
+	draftMu.Unlock()
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Flags:      discordgo.MessageFlagsEphemeral,
+			Embeds:     []*discordgo.MessageEmbed{renderDraftEmbed(draft)},
+			Components: renderDraftControls(),
+		},
+	})
 }
 
 func handleUIDeleteFleet(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -421,11 +489,11 @@ func handleDraftAddWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 					Components: []discordgo.MessageComponent{
 						discordgo.TextInput{
 							CustomID:    "input_wing_name",
-							Label:       "Wing Name",
+							Label:       "Wing Name (max 10 chars)",
 							Style:       discordgo.TextInputShort,
-							Placeholder: "e.g., DPS, Logi, Scouts",
+							Placeholder: "e.g., DPS, Logi",
 							Required:    true,
-							MaxLength:   20,
+							MaxLength:   MaxFleetNodeNameLen,
 						},
 					},
 				},
@@ -447,8 +515,19 @@ func handleModalAddWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	wingName = strings.TrimSpace(wingName)
 	if wingName == "" {
-		wingName = "Unnamed Wing"
+		wingName = "Wing"
+	}
+	if utf8.RuneCountInString(wingName) > MaxFleetNodeNameLen {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("⚠️ Wing name cannot exceed %d characters.", MaxFleetNodeNameLen),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
 	}
 
 	userID := i.Member.User.ID
@@ -486,6 +565,37 @@ func handleModalAddWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
+func resolveSingleWingIndex(wings []WingTemplate) (int, bool) {
+	if len(wings) == 1 {
+		return 0, true
+	}
+	return -1, false
+}
+
+func buildAddSquadModal(wingIndex string) *discordgo.InteractionResponse {
+	return &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseModal,
+		Data: &discordgo.InteractionResponseData{
+			CustomID: "modal_draft_add_squad_" + wingIndex,
+			Title:    "Add New Squad",
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.TextInput{
+							CustomID:    "input_squad_name",
+							Label:       "Squad Name (max 10 chars)",
+							Style:       discordgo.TextInputShort,
+							Placeholder: "e.g., Logi 1, Tackle",
+							Required:    true,
+							MaxLength:   MaxFleetNodeNameLen,
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
 func handleDraftPromptSquadWing(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	userID := i.Member.User.ID
 
@@ -499,7 +609,13 @@ func handleDraftPromptSquadWing(s *discordgo.Session, i *discordgo.InteractionCr
 
 	// Handle expired session or no wings created yet
 	if !exists {
-		editInteraction(s, i.Interaction, "Your draft session expired. Please start over.")
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Your draft session expired. Please start over.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
 		return
 	}
 	if len(wings) == 0 {
@@ -510,6 +626,12 @@ func handleDraftPromptSquadWing(s *discordgo.Session, i *discordgo.InteractionCr
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
+		return
+	}
+
+	// Skip wing selection when there is only 1 wing in the template
+	if singleIdx, ok := resolveSingleWingIndex(wings); ok {
+		_ = s.InteractionRespond(i.Interaction, buildAddSquadModal(strconv.Itoa(singleIdx)))
 		return
 	}
 
@@ -558,27 +680,7 @@ func handleDraftPromptSquadName(s *discordgo.Session, i *discordgo.InteractionCr
 	}
 	wingIndex := data.Values[0]
 
-	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseModal,
-		Data: &discordgo.InteractionResponseData{
-			CustomID: "modal_draft_add_squad_" + wingIndex,
-			Title:    "Add New Squad",
-			Components: []discordgo.MessageComponent{
-				discordgo.ActionsRow{
-					Components: []discordgo.MessageComponent{
-						discordgo.TextInput{
-							CustomID:    "input_squad_name",
-							Label:       "Squad Name",
-							Style:       discordgo.TextInputShort,
-							Placeholder: "e.g., Logi 1, Tackle, Snipers",
-							Required:    true,
-							MaxLength:   20,
-						},
-					},
-				},
-			},
-		},
-	})
+	_ = s.InteractionRespond(i.Interaction, buildAddSquadModal(wingIndex))
 }
 
 func handleModalAddSquad(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -600,8 +702,19 @@ func handleModalAddSquad(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		}
 	}
 
+	squadName = strings.TrimSpace(squadName)
 	if squadName == "" {
-		squadName = "Unnamed Squad"
+		squadName = "Squad"
+	}
+	if utf8.RuneCountInString(squadName) > MaxFleetNodeNameLen {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("⚠️ Squad name cannot exceed %d characters.", MaxFleetNodeNameLen),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
 	}
 
 	userID := i.Member.User.ID
@@ -653,6 +766,268 @@ func handleDraftRestoreUI(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	})
 }
 
+func buildDraftItemOptions(wings []WingTemplate, wingDesc, squadDescFmt string) []discordgo.SelectMenuOption {
+	var options []discordgo.SelectMenuOption
+	for wIdx, w := range wings {
+		if len(options) >= 25 {
+			break
+		}
+		options = append(options, discordgo.SelectMenuOption{
+			Label:       fmt.Sprintf("Wing: %s", w.Name),
+			Value:       fmt.Sprintf("wing_%d", wIdx),
+			Description: wingDesc,
+			Emoji:       &discordgo.ComponentEmoji{Name: "🛡️"},
+		})
+
+		for sIdx, sq := range w.Squads {
+			if len(options) >= 25 {
+				break
+			}
+			options = append(options, discordgo.SelectMenuOption{
+				Label:       fmt.Sprintf("Squad: %s", sq),
+				Value:       fmt.Sprintf("squad_%d_%d", wIdx, sIdx),
+				Description: fmt.Sprintf(squadDescFmt, w.Name),
+				Emoji:       &discordgo.ComponentEmoji{Name: "🚀"},
+			})
+		}
+	}
+	return options
+}
+
+func draftItemName(draft *FleetTemplate, target string) (string, string, bool) {
+	if draft == nil {
+		return "", "", false
+	}
+	if idxStr, ok := strings.CutPrefix(target, "wing_"); ok {
+		wIdx, err := strconv.Atoi(idxStr)
+		if err == nil && wIdx >= 0 && wIdx < len(draft.Wings) {
+			return "Wing", draft.Wings[wIdx].Name, true
+		}
+		return "", "", false
+	}
+	if rest, ok := strings.CutPrefix(target, "squad_"); ok {
+		parts := strings.Split(rest, "_")
+		if len(parts) == 2 {
+			wIdx, err1 := strconv.Atoi(parts[0])
+			sIdx, err2 := strconv.Atoi(parts[1])
+			if err1 == nil && err2 == nil && wIdx >= 0 && wIdx < len(draft.Wings) && sIdx >= 0 && sIdx < len(draft.Wings[wIdx].Squads) {
+				return "Squad", draft.Wings[wIdx].Squads[sIdx], true
+			}
+		}
+	}
+	return "", "", false
+}
+
+func renameDraftItem(draft *FleetTemplate, target, newName string) error {
+	if draft == nil {
+		return fmt.Errorf("no active draft")
+	}
+	trimmed := strings.TrimSpace(newName)
+	if idxStr, ok := strings.CutPrefix(target, "wing_"); ok {
+		if err := validateFleetNodeName("wing", trimmed); err != nil {
+			return err
+		}
+		wIdx, err := strconv.Atoi(idxStr)
+		if err != nil || wIdx < 0 || wIdx >= len(draft.Wings) {
+			return fmt.Errorf("wing not found")
+		}
+		draft.Wings[wIdx].Name = trimmed
+		return nil
+	}
+	if rest, ok := strings.CutPrefix(target, "squad_"); ok {
+		if err := validateFleetNodeName("squad", trimmed); err != nil {
+			return err
+		}
+		parts := strings.Split(rest, "_")
+		if len(parts) != 2 {
+			return fmt.Errorf("invalid squad target")
+		}
+		wIdx, err1 := strconv.Atoi(parts[0])
+		sIdx, err2 := strconv.Atoi(parts[1])
+		if err1 != nil || err2 != nil || wIdx < 0 || wIdx >= len(draft.Wings) || sIdx < 0 || sIdx >= len(draft.Wings[wIdx].Squads) {
+			return fmt.Errorf("squad not found")
+		}
+		draft.Wings[wIdx].Squads[sIdx] = trimmed
+		return nil
+	}
+	return fmt.Errorf("unknown rename target %q", target)
+}
+
+func handleDraftPromptRename(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	userID := interactionUserID(i)
+
+	draftMu.Lock()
+	draft, exists := drafts[userID]
+	var wings []WingTemplate
+	if exists {
+		wings = draft.Wings
+	}
+	draftMu.Unlock()
+
+	if !exists {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Your draft session expired. Please start over.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	if len(wings) == 0 {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "⚠️ There are no wings or squads to rename.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	options := buildDraftItemOptions(wings, "Rename this wing", "Rename squad in Wing: %s")
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Embeds: i.Message.Embeds,
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.SelectMenu{
+							CustomID:    "select_draft_rename_item",
+							Placeholder: "Select a wing or squad to rename...",
+							Options:     options,
+						},
+					},
+				},
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.Button{
+							Label:    "Cancel",
+							Style:    discordgo.SecondaryButton,
+							CustomID: "btn_draft_cancel_action",
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+func handleDraftPromptRenameModal(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
+	if len(data.Values) == 0 {
+		return
+	}
+	target := data.Values[0]
+	userID := interactionUserID(i)
+
+	draftMu.Lock()
+	draft, exists := drafts[userID]
+	kind, currentName, ok := draftItemName(draft, target)
+	draftMu.Unlock()
+
+	if !exists || !ok {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Your draft session expired or that item no longer exists. Please try again.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	prefill := ""
+	placeholder := fmt.Sprintf("Enter up to %d characters", MaxFleetNodeNameLen)
+	if utf8.RuneCountInString(currentName) <= MaxFleetNodeNameLen {
+		prefill = currentName
+	}
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseModal,
+		Data: &discordgo.InteractionResponseData{
+			CustomID: "modal_draft_rename_" + target,
+			Title:    "Rename " + kind,
+			Components: []discordgo.MessageComponent{
+				discordgo.ActionsRow{
+					Components: []discordgo.MessageComponent{
+						discordgo.TextInput{
+							CustomID:    "input_new_name",
+							Label:       fmt.Sprintf("New %s Name (max %d chars)", kind, MaxFleetNodeNameLen),
+							Style:       discordgo.TextInputShort,
+							Placeholder: placeholder,
+							Value:       prefill,
+							Required:    true,
+							MaxLength:   MaxFleetNodeNameLen,
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+func handleModalRenameItem(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.ModalSubmitData()
+	target := strings.TrimPrefix(data.CustomID, "modal_draft_rename_")
+
+	var newName string
+	if len(data.Components) > 0 {
+		if actionRow, ok := data.Components[0].(*discordgo.ActionsRow); ok && len(actionRow.Components) > 0 {
+			if textInput, ok := actionRow.Components[0].(*discordgo.TextInput); ok {
+				newName = textInput.Value
+			}
+		}
+	}
+
+	userID := interactionUserID(i)
+
+	draftMu.Lock()
+	draft, exists := drafts[userID]
+	var renameErr error
+	if exists {
+		renameErr = renameDraftItem(draft, target, newName)
+	}
+	draftMu.Unlock()
+
+	if !exists {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Your draft session expired. Please start over.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	if renameErr != nil {
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "⚠️ " + renameErr.Error(),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	})
+
+	embeds := []*discordgo.MessageEmbed{renderDraftEmbed(draft)}
+	components := renderDraftControls()
+
+	_, _ = s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Embeds:     &embeds,
+		Components: &components,
+	})
+}
+
 func handleDraftPromptRemove(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	userID := i.Member.User.ID
 
@@ -665,7 +1040,13 @@ func handleDraftPromptRemove(s *discordgo.Session, i *discordgo.InteractionCreat
 	draftMu.Unlock()
 
 	if !exists {
-		editInteraction(s, i.Interaction, "Your draft session expired. Please start over.")
+		_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Your draft session expired. Please start over.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
 		return
 	}
 
@@ -680,34 +1061,7 @@ func handleDraftPromptRemove(s *discordgo.Session, i *discordgo.InteractionCreat
 		return
 	}
 
-	var options []discordgo.SelectMenuOption
-
-	// Populate the dropdown with Wings and their respective Squads
-	for wIdx, w := range wings {
-		// Stop adding if we hit Discord's hard limit of 25 options per dropdown
-		if len(options) >= 25 {
-			break
-		}
-
-		options = append(options, discordgo.SelectMenuOption{
-			Label:       fmt.Sprintf("Wing: %s", w.Name),
-			Value:       fmt.Sprintf("wing_%d", wIdx),
-			Description: "Deletes this wing and all its squads",
-			Emoji:       &discordgo.ComponentEmoji{Name: "🛡️"},
-		})
-
-		for sIdx, sq := range w.Squads {
-			if len(options) >= 25 {
-				break
-			}
-			options = append(options, discordgo.SelectMenuOption{
-				Label:       fmt.Sprintf("Squad: %s", sq),
-				Value:       fmt.Sprintf("squad_%d_%d", wIdx, sIdx),
-				Description: fmt.Sprintf("From Wing: %s", w.Name),
-				Emoji:       &discordgo.ComponentEmoji{Name: "🚀"},
-			})
-		}
-	}
+	options := buildDraftItemOptions(wings, "Deletes this wing and all its squads", "From Wing: %s")
 
 	_ = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
@@ -949,6 +1303,11 @@ func renderDraftControls() []discordgo.MessageComponent {
 					Label:    "Add Squad",
 					Style:    discordgo.SecondaryButton,
 					CustomID: "btn_draft_add_squad",
+				},
+				discordgo.Button{
+					Label:    "Rename Item",
+					Style:    discordgo.SecondaryButton,
+					CustomID: "btn_draft_rename_item",
 				},
 				discordgo.Button{
 					Label:    "Remove Item",

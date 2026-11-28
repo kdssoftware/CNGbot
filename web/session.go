@@ -38,19 +38,28 @@ type SessionStore struct {
 	mu          sync.RWMutex
 	sessions    map[string]*UserSession
 	oauthStates map[string]OAuthStateData
+	linkTickets map[string]LinkTicket
 }
 
 type OAuthStateData struct {
-	SessionID string
-	GuildID   string
-	Provider  string
-	Mode      string
-	CreatedAt time.Time
+	SessionID     string
+	GuildID       string
+	Provider      string
+	Mode          string
+	DiscordUserID string
+	CreatedAt     time.Time
+}
+
+type LinkTicket struct {
+	GuildID       string
+	DiscordUserID string
+	CreatedAt     time.Time
 }
 
 var Store = &SessionStore{
 	sessions:    make(map[string]*UserSession),
 	oauthStates: make(map[string]OAuthStateData),
+	linkTickets: make(map[string]LinkTicket),
 }
 
 func GenerateRandomToken(bytesLen int) (string, error) {
@@ -136,7 +145,7 @@ func (s *SessionStore) SetSessionCookie(w http.ResponseWriter, sessionID string,
 	})
 }
 
-func (s *SessionStore) SaveOAuthState(state, sessionID, guildID, provider, mode string) {
+func (s *SessionStore) SaveOAuthState(state, sessionID, guildID, provider, mode string, discordUserID ...string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -148,13 +157,69 @@ func (s *SessionStore) SaveOAuthState(state, sessionID, guildID, provider, mode 
 		}
 	}
 
-	s.oauthStates[state] = OAuthStateData{
-		SessionID: sessionID,
-		GuildID:   guildID,
-		Provider:  provider,
-		Mode:      mode,
-		CreatedAt: now,
+	userID := ""
+	if len(discordUserID) > 0 {
+		userID = discordUserID[0]
 	}
+
+	s.oauthStates[state] = OAuthStateData{
+		SessionID:     sessionID,
+		GuildID:       guildID,
+		Provider:      provider,
+		Mode:          mode,
+		DiscordUserID: userID,
+		CreatedAt:     now,
+	}
+}
+
+// CreateLinkTicket mints a short-lived server-side ticket binding a /link URL
+// to a specific Discord user and guild.
+func (s *SessionStore) CreateLinkTicket(guildID, discordUserID string) (string, error) {
+	ticket, err := GenerateRandomToken(16)
+	if err != nil {
+		return "", err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.linkTickets == nil {
+		s.linkTickets = make(map[string]LinkTicket)
+	}
+
+	now := time.Now()
+	for k, v := range s.linkTickets {
+		if now.Sub(v.CreatedAt) > 15*time.Minute {
+			delete(s.linkTickets, k)
+		}
+	}
+
+	s.linkTickets[ticket] = LinkTicket{
+		GuildID:       guildID,
+		DiscordUserID: discordUserID,
+		CreatedAt:     now,
+	}
+	return ticket, nil
+}
+
+// ResolveLinkTicket returns the Discord user ID bound to ticket for guildID if
+// valid and unexpired. It is non-consuming within its 15-minute window so a
+// user can link multiple alts from one /link prompt.
+func (s *SessionStore) ResolveLinkTicket(ticket, guildID string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	data, exists := s.linkTickets[ticket]
+	if !exists {
+		return "", false
+	}
+	if time.Since(data.CreatedAt) > 15*time.Minute {
+		return "", false
+	}
+	if data.GuildID != guildID {
+		return "", false
+	}
+	return data.DiscordUserID, true
 }
 
 func (s *SessionStore) ValidateAndConsumeOAuthState(state, expectedProvider string) (OAuthStateData, bool) {

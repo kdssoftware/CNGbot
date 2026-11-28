@@ -9,45 +9,45 @@ import (
 
 func TestApplicationCommandsDefinitions(t *testing.T) {
 	expectedCommands := map[string]bool{
-		"dashboard":              true,
-		"map_admin":              true,
-		"map_char_id":            true,
-		"map_corp_id":            true,
-		"map_corp":               true,
-		"map_alliance":           true,
-		"map_greet_role":        true,
-		"seat_needed_roles":     true,
-		"req_corp_for_alliance": true,
-		"rm_corp":               true,
-		"rm_corp_id":             true,
-		"rm_alliance":            true,
-		"rm_char_id":             true,
-		"map_char":               true,
-		"sync":                   true,
-		"report":                 true,
-		"help":                   true,
-		"exclude_sync":           true,
-		"exclude_map":            true,
-		"exclude_corp_standing":  true,
-		"exclude_2fa":            true,
-		"toggle_2fa":              true,
-		"set_log_channel":        true,
-		"set_events_channel":     true,
-		"set_mail_channel":       true,
-		"toggle_logs":            true,
-		"toggle_automap":         true,
-		"toggle_auto_fleet_invite": true,
-		"set_fleet_alliance":      true,
-		"link":                    true,
-		"courier_fee":             true,
-		"set_greeting":           true,
-		"set_guest":              true,
-		"set_missing_seat_role":  true,
-		"map_standing_terrible":  true,
-		"map_standing_bad":       true,
-		"map_standing_neutral":   true,
-		"map_standing_good":      true,
-		"map_standing_excellent": true,
+		"dashboard":                       true,
+		"map_admin":                       true,
+		"map_char_id":                     true,
+		"map_corp_id":                     true,
+		"map_corp":                        true,
+		"map_alliance":                    true,
+		"map_greet_role":                  true,
+		"seat_needed_roles":               true,
+		"req_corp_for_alliance":           true,
+		"rm_corp":                         true,
+		"rm_corp_id":                      true,
+		"rm_alliance":                     true,
+		"rm_char_id":                      true,
+		"map_char":                        true,
+		"sync":                            true,
+		"report":                          true,
+		"help":                            true,
+		"exclude_sync":                    true,
+		"exclude_map":                     true,
+		"exclude_corp_standing":           true,
+		"exclude_2fa":                     true,
+		"toggle_2fa":                      true,
+		"set_log_channel":                 true,
+		"set_events_channel":              true,
+		"set_mail_channel":                true,
+		"toggle_logs":                     true,
+		"toggle_automap":                  true,
+		"toggle_auto_fleet_invite":        true,
+		"set_fleet_alliance":              true,
+		"link":                            true,
+		"courier_fee":                     true,
+		"set_greeting":                    true,
+		"set_guest":                       true,
+		"set_missing_seat_role":           true,
+		"map_standing_terrible":           true,
+		"map_standing_bad":                true,
+		"map_standing_neutral":            true,
+		"map_standing_good":               true,
+		"map_standing_excellent":          true,
 		"char_info":                       true,
 		"id":                              true,
 		"set_donations_channel":           true,
@@ -153,11 +153,11 @@ func TestGetOption(t *testing.T) {
 
 func TestResolveDiscordID(t *testing.T) {
 	tests := []struct {
-		name          string
-		input         string
-		expectedID    string
-		expectedFmt   string
-		expectErr     bool
+		name        string
+		input       string
+		expectedID  string
+		expectedFmt string
+		expectErr   bool
 	}{
 		{
 			name:        "User Mention standard",
@@ -307,5 +307,42 @@ func TestDonationCommandsOptions(t *testing.T) {
 	}
 	if len(importCmd.Options) != 3 {
 		t.Errorf("expected 3 options for import_donations, got %d", len(importCmd.Options))
+	}
+}
+
+func TestUsesDiscordIntegrationPermissions(t *testing.T) {
+	for _, cmd := range []string{"link", "fleet_build"} {
+		if !usesDiscordIntegrationPermissions(cmd) {
+			t.Errorf("expected %q to use Discord integration permissions", cmd)
+		}
+	}
+	for _, cmd := range []string{"fleet_template", "fleet_panel", "set_fleet_alliance", "map_admin", "dashboard"} {
+		if usesDiscordIntegrationPermissions(cmd) {
+			t.Errorf("expected %q NOT to bypass admin permission gate", cmd)
+		}
+	}
+}
+
+func TestFleetBuildCommandPermissions(t *testing.T) {
+	var fleetBuild, linkCmd *discordgo.ApplicationCommand
+	for _, cmd := range Commands {
+		switch cmd.Name {
+		case "fleet_build":
+			fleetBuild = cmd
+		case "link":
+			linkCmd = cmd
+		}
+	}
+	if fleetBuild == nil {
+		t.Fatal("missing fleet_build command")
+	}
+	if fleetBuild.DefaultMemberPermissions != nil {
+		t.Errorf("expected fleet_build DefaultMemberPermissions to be nil, got %v", *fleetBuild.DefaultMemberPermissions)
+	}
+	if linkCmd == nil {
+		t.Fatal("missing link command")
+	}
+	if len(linkCmd.Description) == 0 || len(linkCmd.Description) > 100 {
+		t.Errorf("invalid link command description length: %d", len(linkCmd.Description))
 	}
 }

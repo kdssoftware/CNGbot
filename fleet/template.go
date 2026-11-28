@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"evemaildiscord/db"
 )
+
+// MaxFleetNodeNameLen is EVE ESI's maximum allowed length for fleet wing and squad names.
+const MaxFleetNodeNameLen = 10
 
 type FleetTemplate struct {
 	Name  string         `json:"name"`
@@ -26,21 +30,43 @@ type esiMember struct {
 	WingID      int64  `json:"wing_id"`
 }
 
-// Validate ensures the template conforms to ESI's 5x5 hard limits.
+func validateFleetNodeName(kind, name string) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("%s name cannot be empty", kind)
+	}
+	if utf8.RuneCountInString(trimmed) > MaxFleetNodeNameLen {
+		return fmt.Errorf("%s name '%s' exceeds the maximum length of %d characters", kind, trimmed, MaxFleetNodeNameLen)
+	}
+	return nil
+}
+
+// Validate ensures the template conforms to ESI's 5x5 structure and 10-character name limits.
 func (t *FleetTemplate) Validate() error {
 	if len(t.Wings) > 5 {
 		return fmt.Errorf("a fleet can have a maximum of 5 wings")
 	}
 	for i, w := range t.Wings {
+		if err := validateFleetNodeName("wing", w.Name); err != nil {
+			return fmt.Errorf("wing index %d: %w", i, err)
+		}
 		if len(w.Squads) > 5 {
 			return fmt.Errorf("wing '%s' (index %d) exceeds the maximum of 5 squads", w.Name, i)
+		}
+		for j, sq := range w.Squads {
+			if err := validateFleetNodeName("squad", sq); err != nil {
+				return fmt.Errorf("wing '%s' squad index %d: %w", w.Name, j, err)
+			}
 		}
 	}
 	return nil
 }
 
-// SaveFleetTemplate stores a template JSON in the config table.
+// SaveFleetTemplate validates and stores a template JSON in the config table.
 func SaveFleetTemplate(guildID string, tpl FleetTemplate) error {
+	if err := tpl.Validate(); err != nil {
+		return err
+	}
 	jsonBytes, err := json.Marshal(tpl)
 	if err != nil {
 		return err
