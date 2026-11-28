@@ -46,7 +46,7 @@ Here is a full list of all available commands for the CNG Bot and what they do.
 * `/toggle_automap`: Toggle automatic character mapping of new server members on join.
 * `/toggle_auto_fleet_invite`: Toggle auto-inviting linked alliance members in wormhole space into the fleet of a linked fleet boss. Members must run `/link` so the bot can check their location and invite them; the boss's ESI token must include the esi-fleets scopes (via `/link` or dashboard re-link).
 * `/set_fleet_alliance`: Set the Discord role mapped to an EVE alliance (via `/map_alliance`) whose linked characters are auto-invited when a linked fleet boss is in J-space (omit role to clear).
-* `/link`: Get a link to log in your EVE character directly via EVE SSO with the scopes needed for auto fleet invite. Only characters in the alliance set via `/set_fleet_alliance` are accepted.
+* `/link`: Get a link to log in your EVE character directly via EVE SSO with the scopes needed for auto fleet invites and `/fleet_build`. Only characters in the alliance set via `/set_fleet_alliance` are accepted. Access is controlled via Discord Server Integrations permissions.
 * `/fleet_template`
   * `save`: Allows you to save a fleet configuration as a template.
   ```json
@@ -68,7 +68,7 @@ Here is a full list of all available commands for the CNG Bot and what they do.
   ```
   * `set-default`: Set the desired template as the server (alliance)'s default.
   * `remove`: Removes the specified fleet template
-* `/fleet_build`: Creates the wings/squads in-game to reflect the selected template.
+* `/fleet_build`: Creates the wings/squads in-game to reflect the selected template using your own `/link`ed EVE character (must be Fleet Boss with fleet scopes). Access is controlled via Discord Server Integrations permissions.
 * `/fleet_panel`: Spawn a panel to have a GUI of the `/fleet_build` command.
 * `/set_greeting`: Configure automatic greeting message for new members on join.
 * `/set_guest`: Set the guest role applied to mapped users whose Corp or Alliance is not yet mapped.

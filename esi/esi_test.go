@@ -2,6 +2,9 @@ package esi
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -153,4 +156,150 @@ func TestCachingTransport(t *testing.T) {
 	if requestsCount != 1 {
 		t.Errorf("expected 1 request to hit the server due to caching, got %d", requestsCount)
 	}
+}
+
+func makeTestJWT(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`))
+	payloadBytes, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("failed to marshal claims: %v", err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+	return header + "." + payload + ".sig"
+}
+
+func TestExtractScopesFromJWT(t *testing.T) {
+	t.Run("array scp", func(t *testing.T) {
+		jwt := makeTestJWT(t, map[string]any{
+			"scp": []string{"publicData", "esi-fleets.read_fleet.v1", "esi-fleets.write_fleet.v1"},
+		})
+		scopes, ok := ExtractScopesFromJWT(jwt)
+		if !ok || len(scopes) != 3 {
+			t.Fatalf("expected 3 scopes, got ok=%v scopes=%v", ok, scopes)
+		}
+	})
+
+	t.Run("single string scp", func(t *testing.T) {
+		jwt := makeTestJWT(t, map[string]any{
+			"scp": "esi-fleets.read_fleet.v1",
+		})
+		scopes, ok := ExtractScopesFromJWT(jwt)
+		if !ok || len(scopes) != 1 || scopes[0] != "esi-fleets.read_fleet.v1" {
+			t.Fatalf("expected single scope, got ok=%v scopes=%v", ok, scopes)
+		}
+	})
+
+	t.Run("missing scp", func(t *testing.T) {
+		jwt := makeTestJWT(t, map[string]any{"sub": "CHARACTER:EVE:123"})
+		if scopes, ok := ExtractScopesFromJWT(jwt); ok || len(scopes) != 0 {
+			t.Fatalf("expected missing scp, got ok=%v scopes=%v", ok, scopes)
+		}
+	})
+
+	t.Run("malformed jwt", func(t *testing.T) {
+		if scopes, ok := ExtractScopesFromJWT("not-a-jwt"); ok || len(scopes) != 0 {
+			t.Fatalf("expected malformed jwt to fail, got ok=%v scopes=%v", ok, scopes)
+		}
+	})
+}
+
+func TestMissingScopes(t *testing.T) {
+	granted := []string{"publicData", "esi-fleets.read_fleet.v1"}
+	required := []string{"esi-fleets.read_fleet.v1", "esi-fleets.write_fleet.v1"}
+
+	missing := MissingScopes(granted, required)
+	if len(missing) != 1 || missing[0] != "esi-fleets.write_fleet.v1" {
+		t.Fatalf("expected [esi-fleets.write_fleet.v1], got %v", missing)
+	}
+
+	if got := MissingScopes(append(granted, "esi-fleets.write_fleet.v1"), required); len(got) != 0 {
+		t.Fatalf("expected no missing scopes, got %v", got)
+	}
+}
+
+func TestGetOAuthHTTPClientForScopes(t *testing.T) {
+	t.Setenv("EVE_CLIENT_ID", "test-client")
+	t.Setenv("EVE_SECRET", "test-secret")
+
+	t.Run("valid scopes", func(t *testing.T) {
+		jwt := makeTestJWT(t, map[string]any{
+			"scp": []string{"esi-fleets.read_fleet.v1", "esi-fleets.write_fleet.v1"},
+		})
+		tokenHits := 0
+		tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenHits++
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token":  jwt,
+				"token_type":    "Bearer",
+				"expires_in":    1200,
+				"refresh_token": "refreshed-tok",
+			})
+		}))
+		defer tokenSrv.Close()
+
+		origTokenURL := eveTokenURL
+		eveTokenURL = tokenSrv.URL
+		defer func() { eveTokenURL = origTokenURL }()
+
+		client, err := GetOAuthHTTPClientForScopes("my-refresh-tok", "esi-fleets.read_fleet.v1", "esi-fleets.write_fleet.v1")
+		if err != nil {
+			t.Fatalf("expected success, got err=%v", err)
+		}
+		if client == nil {
+			t.Fatal("expected non-nil client")
+		}
+
+		var gotAuth string
+		apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotAuth = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer apiSrv.Close()
+
+		resp, err := client.Get(apiSrv.URL + "/test")
+		if err != nil {
+			t.Fatalf("api call failed: %v", err)
+		}
+		_ = resp.Body.Close()
+
+		if gotAuth != "Bearer "+jwt {
+			t.Errorf("expected Bearer JWT, got %q", gotAuth)
+		}
+		if tokenHits != 1 {
+			t.Errorf("expected token endpoint to be called once, got %d", tokenHits)
+		}
+	})
+
+	t.Run("missing scope returns MissingScopesError", func(t *testing.T) {
+		jwt := makeTestJWT(t, map[string]any{
+			"scp": []string{"esi-fleets.read_fleet.v1"},
+		})
+		tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"access_token": jwt,
+				"token_type":   "Bearer",
+				"expires_in":   1200,
+			})
+		}))
+		defer tokenSrv.Close()
+
+		origTokenURL := eveTokenURL
+		eveTokenURL = tokenSrv.URL
+		defer func() { eveTokenURL = origTokenURL }()
+
+		client, err := GetOAuthHTTPClientForScopes("my-refresh-tok", "esi-fleets.read_fleet.v1", "esi-fleets.write_fleet.v1")
+		if client != nil {
+			t.Fatalf("expected nil client on missing scopes, got %v", client)
+		}
+		var missingErr *MissingScopesError
+		if !errors.As(err, &missingErr) {
+			t.Fatalf("expected *MissingScopesError, got %T (%v)", err, err)
+		}
+		if len(missingErr.Missing) != 1 || missingErr.Missing[0] != "esi-fleets.write_fleet.v1" {
+			t.Fatalf("unexpected missing scopes: %v", missingErr.Missing)
+		}
+	})
 }

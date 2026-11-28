@@ -257,6 +257,70 @@ func TestCharacterTokens(t *testing.T) {
 	}
 }
 
+func TestGetUserCharacterTokens(t *testing.T) {
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test_user_character_tokens.db")
+
+	database, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	defer database.Close()
+
+	if err := createOrMigrateTables(database); err != nil {
+		t.Fatalf("createOrMigrateTables failed: %v", err)
+	}
+
+	oldDB := DB
+	DB = database
+	defer func() { DB = oldDB }()
+
+	// Direct bindings for user_1 (two alts in g1, one alt in g2) and user_2 in g1.
+	if err := SetCharacterToken(1001, "tok_u1_a", "g1", "user_1"); err != nil {
+		t.Fatalf("failed to set token 1001: %v", err)
+	}
+	if err := SetCharacterToken(1002, "tok_u1_b", "g1", "user_1"); err != nil {
+		t.Fatalf("failed to set token 1002: %v", err)
+	}
+	if err := SetCharacterToken(1003, "tok_u2", "g1", "user_2"); err != nil {
+		t.Fatalf("failed to set token 1003: %v", err)
+	}
+	if err := SetCharacterToken(2001, "tok_u1_g2", "g2", "user_1"); err != nil {
+		t.Fatalf("failed to set token 2001: %v", err)
+	}
+
+	// Legacy tokens with empty discord_user_id resolved via character_to_discord.
+	if err := SetCharacterToken(1004, "tok_u1_legacy", "g1", ""); err != nil {
+		t.Fatalf("failed to set token 1004: %v", err)
+	}
+	if err := SetCharacterToken(1005, "tok_u2_legacy", "g1", ""); err != nil {
+		t.Fatalf("failed to set token 1005: %v", err)
+	}
+	if _, err := database.Exec("INSERT INTO character_to_discord (eve_id, discord_id) VALUES (1004, 'user_1'), (1005, 'user_2')"); err != nil {
+		t.Fatalf("failed to insert character_to_discord: %v", err)
+	}
+
+	got, err := GetUserCharacterTokens("g1", "user_1")
+	if err != nil {
+		t.Fatalf("GetUserCharacterTokens failed: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 tokens for user_1 in g1, got %d: %+v", len(got), got)
+	}
+	found := make(map[int]string)
+	for _, ct := range got {
+		found[ct.EveCharacterID] = ct.RefreshToken
+	}
+	if found[1001] != "tok_u1_a" || found[1002] != "tok_u1_b" || found[1004] != "tok_u1_legacy" {
+		t.Fatalf("unexpected token set for user_1 in g1: %+v", found)
+	}
+
+	gotG2, err := GetUserCharacterTokens("g2", "user_1")
+	if err != nil || len(gotG2) != 1 || gotG2[0].EveCharacterID != 2001 {
+		t.Fatalf("expected only char 2001 for user_1 in g2, got %+v (err: %v)", gotG2, err)
+	}
+}
+
 func TestDonationsDatabase(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test_donations.db")

@@ -3,9 +3,135 @@ package fleet
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
+
+	"evemaildiscord/db"
+	"evemaildiscord/esi"
+	"evemaildiscord/web"
+
+	"github.com/bwmarrin/discordgo"
 )
+
+var fleetBuilderScopes = []string{
+	"esi-fleets.read_fleet.v1",
+	"esi-fleets.write_fleet.v1",
+}
+
+// Package-level hook so unit tests can stub OAuth client creation without hitting EVE SSO.
+var oauthClientForScopes = esi.GetOAuthHTTPClientForScopes
+
+type esiStatusError struct {
+	StatusCode int
+	Operation  string
+	Body       string
+}
+
+func (e *esiStatusError) Error() string {
+	if e.Body != "" {
+		return fmt.Sprintf("%s failed with status %d: %s", e.Operation, e.StatusCode, e.Body)
+	}
+	return fmt.Sprintf("%s failed with status %d", e.Operation, e.StatusCode)
+}
+
+func isForbiddenError(err error) bool {
+	var statusErr *esiStatusError
+	return errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusForbidden
+}
+
+func readErrorBody(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, 512))
+	return strings.TrimSpace(string(b))
+}
+
+func interactionUserID(i *discordgo.InteractionCreate) string {
+	if i == nil {
+		return ""
+	}
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID
+	}
+	if i.User != nil {
+		return i.User.ID
+	}
+	return ""
+}
+
+func formatLinkPrompt(guildID, discordUserID, reason string) string {
+	link := web.BuildCharacterLinkURL(guildID, discordUserID)
+	return fmt.Sprintf("%s\nPlease authorize your EVE character via `/link` (or use this link directly): %s", reason, link)
+}
+
+// resolveUserFleetBoss finds a linked EVE character belonging to discordUserID
+// in guildID that has requiredScopes and is currently the Fleet Boss of an
+// active fleet. On failure, prompt contains an actionable user-facing message.
+func resolveUserFleetBoss(guildID, discordUserID string, requiredScopes []string) (*http.Client, ownFleet, string) {
+	tokens, err := db.GetUserCharacterTokens(guildID, discordUserID)
+	if err != nil {
+		return nil, ownFleet{}, fmt.Sprintf("Failed to look up your linked EVE characters: %v", err)
+	}
+	if len(tokens) == 0 {
+		return nil, ownFleet{}, formatLinkPrompt(guildID, discordUserID, "You don't have an EVE character linked for this server yet.")
+	}
+
+	var (
+		inFleetNotBoss bool
+		hadValidToken  bool
+		hadForbidden   bool
+		hadAuthErr     bool
+		missingScopes  []string
+	)
+
+	for _, tok := range tokens {
+		client, err := oauthClientForScopes(tok.RefreshToken, requiredScopes...)
+		if err != nil {
+			var missingErr *esi.MissingScopesError
+			if errors.As(err, &missingErr) {
+				missingScopes = missingErr.Missing
+			} else {
+				hadAuthErr = true
+			}
+			continue
+		}
+
+		fl, status, err := GetOwnFleet(client, tok.EveCharacterID)
+		if err != nil {
+			if status == http.StatusForbidden {
+				hadForbidden = true
+			} else {
+				hadAuthErr = true
+			}
+			continue
+		}
+
+		hadValidToken = true
+		if fl.FleetID == 0 {
+			continue
+		}
+		if fl.FleetBossID == int64(tok.EveCharacterID) {
+			return client, fl, ""
+		}
+		inFleetNotBoss = true
+	}
+
+	switch {
+	case inFleetNotBoss:
+		return nil, ownFleet{}, "You must be the Fleet Boss in-game to structure the fleet."
+	case hadValidToken:
+		return nil, ownFleet{}, "You must be in an active EVE fleet as Fleet Boss to use this command."
+	case len(missingScopes) > 0:
+		return nil, ownFleet{}, formatLinkPrompt(guildID, discordUserID, fmt.Sprintf("Your linked EVE character token is missing required ESI scope(s): `%s`.", strings.Join(missingScopes, "`, `")))
+	case hadForbidden:
+		return nil, ownFleet{}, formatLinkPrompt(guildID, discordUserID, "Your linked EVE character token does not have the required fleet permissions (ESI returned 403).")
+	case hadAuthErr:
+		return nil, ownFleet{}, formatLinkPrompt(guildID, discordUserID, "Failed to authenticate your linked EVE character with EVE SSO.")
+	default:
+		return nil, ownFleet{}, formatLinkPrompt(guildID, discordUserID, "Unable to authorize your linked EVE character for fleet management.")
+	}
+}
 
 // ==========================================
 // 1. High-Level Orchestrator
@@ -138,6 +264,9 @@ func MoveMembersToFirstSquad(client *http.Client, fleet ownFleet) error {
 		if member.CharacterID == fleet.FleetBossID {
 			err := moveFleetMember(client, fleet.FleetID, member.CharacterID, 0, 0, "fleet_commander")
 			if err != nil {
+				if isForbiddenError(err) {
+					return err
+				}
 				fmt.Printf("Warning: Failed to move character %d: %v\n", member.CharacterID, err)
 			}
 			continue
@@ -149,6 +278,9 @@ func MoveMembersToFirstSquad(client *http.Client, fleet ownFleet) error {
 
 		err := moveFleetMember(client, fleet.FleetID, member.CharacterID, targetWingID, targetSquadID, "squad_member")
 		if err != nil {
+			if isForbiddenError(err) {
+				return err
+			}
 			fmt.Printf("Warning: Failed to move character %d: %v\n", member.CharacterID, err)
 		}
 	}
@@ -168,7 +300,7 @@ func fetchCurrentLayout(client *http.Client, fleetID int64) ([]esiWing, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("failed to fetch wings, status: %d", resp.StatusCode)
+		return nil, &esiStatusError{StatusCode: resp.StatusCode, Operation: "fetch wings", Body: readErrorBody(resp.Body)}
 	}
 
 	var wings []esiWing
@@ -187,7 +319,7 @@ func createNode(client *http.Client, url, idKey string) (int64, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 201 {
-		return 0, fmt.Errorf("creation failed with status: %d", resp.StatusCode)
+		return 0, &esiStatusError{StatusCode: resp.StatusCode, Operation: "creation", Body: readErrorBody(resp.Body)}
 	}
 
 	var result map[string]int64
@@ -209,7 +341,7 @@ func deleteNode(client *http.Client, url string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 204 {
-		return fmt.Errorf("deletion failed with status: %d", resp.StatusCode)
+		return &esiStatusError{StatusCode: resp.StatusCode, Operation: "deletion", Body: readErrorBody(resp.Body)}
 	}
 	return nil
 }
@@ -229,7 +361,7 @@ func renameFleetNode(client *http.Client, url, name string) error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 204 {
-		return fmt.Errorf("rename failed with status: %d", resp.StatusCode)
+		return &esiStatusError{StatusCode: resp.StatusCode, Operation: "rename", Body: readErrorBody(resp.Body)}
 	}
 	return nil
 }
@@ -242,7 +374,7 @@ func fetchFleetMembers(client *http.Client, fleetID int64) ([]esiMember, error) 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("failed to fetch fleet members, status: %d", resp.StatusCode)
+		return nil, &esiStatusError{StatusCode: resp.StatusCode, Operation: "fetch fleet members", Body: readErrorBody(resp.Body)}
 	}
 
 	var members []esiMember
@@ -280,7 +412,7 @@ func moveFleetMember(client *http.Client, fleetID, charID, wingID, squadID int64
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != 204 {
-		return fmt.Errorf("move failed with status: %d", resp.StatusCode)
+		return &esiStatusError{StatusCode: resp.StatusCode, Operation: "move fleet member", Body: readErrorBody(resp.Body)}
 	}
 	return nil
 }

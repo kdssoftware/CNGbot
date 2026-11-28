@@ -1,11 +1,19 @@
 package fleet
 
 import (
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"evemaildiscord/db"
+	"evemaildiscord/esi"
+
+	"github.com/bwmarrin/discordgo"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func TestIsJSpace(t *testing.T) {
@@ -236,5 +244,445 @@ func TestFetchESILocation(t *testing.T) {
 				t.Errorf("expected solar system %d, got %d", tc.want, got)
 			}
 		})
+	}
+}
+
+func setupFleetTestDB(t *testing.T) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "fleet_test.db")
+	database, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("failed to open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	_, err = database.Exec(`
+		CREATE TABLE character_tokens (
+			eve_character_id INTEGER PRIMARY KEY,
+			refresh_token TEXT NOT NULL DEFAULT '',
+			guild_id TEXT NOT NULL DEFAULT '',
+			discord_user_id TEXT NOT NULL DEFAULT '',
+			linked_at DATETIME
+		);
+		CREATE TABLE character_to_discord (
+			eve_id INTEGER PRIMARY KEY,
+			discord_id TEXT
+		);
+		CREATE TABLE config (
+			guild_id TEXT NOT NULL DEFAULT '',
+			key TEXT NOT NULL,
+			value TEXT NOT NULL,
+			PRIMARY KEY (guild_id, key)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("failed to init test schema: %v", err)
+	}
+
+	oldDB := db.DB
+	db.DB = database
+	t.Cleanup(func() { db.DB = oldDB })
+}
+
+func TestResolveUserFleetBoss(t *testing.T) {
+	t.Setenv("DASHBOARD_URL", "https://bot.example.com")
+
+	t.Run("no linked characters prompts /link", func(t *testing.T) {
+		setupFleetTestDB(t)
+
+		client, fl, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if client != nil || fl.FleetID != 0 {
+			t.Fatalf("expected no fleet client, got client=%v fleet=%+v", client, fl)
+		}
+		if !strings.Contains(prompt, "/auth/eve/login") || !strings.Contains(prompt, "link_token=") {
+			t.Fatalf("expected /link URL in prompt, got: %s", prompt)
+		}
+	})
+
+	t.Run("missing scope prompts /link with missing scope name", func(t *testing.T) {
+		setupFleetTestDB(t)
+		if err := db.SetCharacterToken(1001, "tok_missing_write", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert token: %v", err)
+		}
+
+		origOAuth := oauthClientForScopes
+		oauthClientForScopes = func(refreshToken string, requiredScopes ...string) (*http.Client, error) {
+			return nil, &esi.MissingScopesError{Missing: []string{"esi-fleets.write_fleet.v1"}}
+		}
+		defer func() { oauthClientForScopes = origOAuth }()
+
+		client, _, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if client != nil {
+			t.Fatalf("expected nil client")
+		}
+		if !strings.Contains(prompt, "esi-fleets.write_fleet.v1") || !strings.Contains(prompt, "/auth/eve/login") {
+			t.Fatalf("expected missing scope and /link URL in prompt, got: %s", prompt)
+		}
+	})
+
+	t.Run("selects fleet boss alt when another alt lacks scope or fleet", func(t *testing.T) {
+		setupFleetTestDB(t)
+		if err := db.SetCharacterToken(1001, "tok_alt1_missing", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert alt 1: %v", err)
+		}
+		if err := db.SetCharacterToken(1002, "tok_alt2_boss", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert alt 2: %v", err)
+		}
+
+		esiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/characters/1002/fleet/" {
+				_, _ = w.Write([]byte(`{"fleet_id":555,"fleet_boss_id":1002,"role":"fleet_commander"}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		defer esiSrv.Close()
+
+		origBase := esiBase
+		esiBase = esiSrv.URL
+		defer func() { esiBase = origBase }()
+
+		origOAuth := oauthClientForScopes
+		oauthClientForScopes = func(refreshToken string, requiredScopes ...string) (*http.Client, error) {
+			if refreshToken == "tok_alt1_missing" {
+				return nil, &esi.MissingScopesError{Missing: []string{"esi-fleets.write_fleet.v1"}}
+			}
+			return esiSrv.Client(), nil
+		}
+		defer func() { oauthClientForScopes = origOAuth }()
+
+		client, fl, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if prompt != "" || client == nil || fl.FleetID != 555 || fl.FleetBossID != 1002 {
+			t.Fatalf("expected alt 2 fleet boss, got fl=%+v prompt=%q", fl, prompt)
+		}
+	})
+
+	t.Run("in fleet but not boss returns clear message", func(t *testing.T) {
+		setupFleetTestDB(t)
+		if err := db.SetCharacterToken(1001, "tok_member", "g1", "discord_1"); err != nil {
+			t.Fatalf("failed to insert token: %v", err)
+		}
+
+		esiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"fleet_id":555,"fleet_boss_id":9999,"role":"squad_member"}`))
+		}))
+		defer esiSrv.Close()
+
+		origBase := esiBase
+		esiBase = esiSrv.URL
+		defer func() { esiBase = origBase }()
+
+		origOAuth := oauthClientForScopes
+		oauthClientForScopes = func(refreshToken string, requiredScopes ...string) (*http.Client, error) {
+			return esiSrv.Client(), nil
+		}
+		defer func() { oauthClientForScopes = origOAuth }()
+
+		client, _, prompt := resolveUserFleetBoss("g1", "discord_1", fleetBuilderScopes)
+		if client != nil || !strings.Contains(prompt, "Fleet Boss") {
+			t.Fatalf("expected Fleet Boss error, got client=%v prompt=%q", client, prompt)
+		}
+	})
+}
+
+func TestFleetBuilder_ForbiddenError(t *testing.T) {
+	t.Run("BuildFleetFromTemplate 403", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":"missing scope"}`))
+		}))
+		defer srv.Close()
+
+		origBase := esiBase
+		esiBase = srv.URL
+		defer func() { esiBase = origBase }()
+
+		err := BuildFleetFromTemplate(srv.Client(), 12345, FleetTemplate{
+			Name:  "PVP",
+			Wings: []WingTemplate{{Name: "Main", Squads: []string{"DPS"}}},
+		})
+		if err == nil || !isForbiddenError(err) {
+			t.Fatalf("expected forbidden error, got %v", err)
+		}
+	})
+
+	t.Run("MoveMembersToFirstSquad 403 on move", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/fleets/12345/wings/":
+				_, _ = w.Write([]byte(`[{"id":1,"name":"W1","squads":[{"id":10,"name":"S1"}]}]`))
+			case r.Method == http.MethodGet && r.URL.Path == "/fleets/12345/members/":
+				_, _ = w.Write([]byte(`[{"character_id":200,"role":"squad_member","wing_id":2,"squad_id":20}]`))
+			case r.Method == http.MethodPut:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":"forbidden"}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		defer srv.Close()
+
+		origBase := esiBase
+		esiBase = srv.URL
+		defer func() { esiBase = origBase }()
+
+		err := MoveMembersToFirstSquad(srv.Client(), ownFleet{FleetID: 12345, FleetBossID: 100})
+		if err == nil || !isForbiddenError(err) {
+			t.Fatalf("expected forbidden error from MoveMembersToFirstSquad, got %v", err)
+		}
+	})
+}
+
+func TestFleetTemplateValidateAndSave(t *testing.T) {
+	setupFleetTestDB(t)
+
+	valid := FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "1234567890", Squads: []string{"1234567890", "Logi"}},
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("expected 10-char names to be valid, got: %v", err)
+	}
+	if err := SaveFleetTemplate("g1", valid); err != nil {
+		t.Fatalf("expected SaveFleetTemplate to succeed for valid template, got: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		tpl  FleetTemplate
+	}{
+		{
+			name: "wing name over 10 chars",
+			tpl: FleetTemplate{
+				Name:  "BadWing",
+				Wings: []WingTemplate{{Name: "12345678901", Squads: []string{"DPS"}}},
+			},
+		},
+		{
+			name: "squad name over 10 chars",
+			tpl: FleetTemplate{
+				Name:  "BadSquad",
+				Wings: []WingTemplate{{Name: "Main", Squads: []string{"12345678901"}}},
+			},
+		},
+		{
+			name: "empty wing name",
+			tpl: FleetTemplate{
+				Name:  "EmptyWing",
+				Wings: []WingTemplate{{Name: "   ", Squads: []string{"DPS"}}},
+			},
+		},
+		{
+			name: "empty squad name",
+			tpl: FleetTemplate{
+				Name:  "EmptySquad",
+				Wings: []WingTemplate{{Name: "Main", Squads: []string{""}}},
+			},
+		},
+		{
+			name: "too many wings",
+			tpl: FleetTemplate{
+				Name: "SixWings",
+				Wings: []WingTemplate{
+					{Name: "W1"}, {Name: "W2"}, {Name: "W3"}, {Name: "W4"}, {Name: "W5"}, {Name: "W6"},
+				},
+			},
+		},
+		{
+			name: "too many squads",
+			tpl: FleetTemplate{
+				Name:  "SixSquads",
+				Wings: []WingTemplate{{Name: "W1", Squads: []string{"S1", "S2", "S3", "S4", "S5", "S6"}}},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.tpl.Validate(); err == nil {
+				t.Fatalf("expected validation error for %s, got nil", tc.name)
+			}
+			if err := SaveFleetTemplate("g1", tc.tpl); err == nil {
+				t.Fatalf("expected SaveFleetTemplate to reject %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestAddSquadSingleWingShortcut(t *testing.T) {
+	if idx, ok := resolveSingleWingIndex(nil); ok || idx != -1 {
+		t.Fatalf("expected no single wing for empty slice, got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := resolveSingleWingIndex([]WingTemplate{{Name: "Main"}}); !ok || idx != 0 {
+		t.Fatalf("expected index 0 for single wing, got idx=%d ok=%v", idx, ok)
+	}
+	if idx, ok := resolveSingleWingIndex([]WingTemplate{{Name: "Main"}, {Name: "Logi"}}); ok || idx != -1 {
+		t.Fatalf("expected no single wing for multiple wings, got idx=%d ok=%v", idx, ok)
+	}
+
+	modal := buildAddSquadModal("0")
+	if modal.Type != discordgo.InteractionResponseModal {
+		t.Fatalf("expected modal response type, got %v", modal.Type)
+	}
+	if modal.Data.CustomID != "modal_draft_add_squad_0" {
+		t.Fatalf("expected CustomID modal_draft_add_squad_0, got %q", modal.Data.CustomID)
+	}
+	row, ok := modal.Data.Components[0].(discordgo.ActionsRow)
+	if !ok || len(row.Components) != 1 {
+		t.Fatalf("expected single text input in modal row, got %+v", modal.Data.Components)
+	}
+	input, ok := row.Components[0].(discordgo.TextInput)
+	if !ok || input.MaxLength != MaxFleetNodeNameLen {
+		t.Fatalf("expected TextInput with MaxLength %d, got %+v", MaxFleetNodeNameLen, row.Components[0])
+	}
+}
+
+func TestCloneFleetTemplate(t *testing.T) {
+	orig := FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "Main", Squads: []string{"DPS", "Logi"}},
+		},
+	}
+
+	cloned := cloneFleetTemplate(orig)
+	cloned.Wings[0].Name = "Changed"
+	cloned.Wings[0].Squads[0] = "Tackle"
+
+	if orig.Wings[0].Name != "Main" || orig.Wings[0].Squads[0] != "DPS" {
+		t.Fatalf("mutating clone affected original template: %+v", orig)
+	}
+}
+
+func TestRenameDraftItem(t *testing.T) {
+	draft := &FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "Main", Squads: []string{"DPS", "Logi"}},
+		},
+	}
+
+	if err := renameDraftItem(draft, "wing_0", "  Brawl  "); err != nil {
+		t.Fatalf("expected wing rename to succeed, got %v", err)
+	}
+	if draft.Wings[0].Name != "Brawl" {
+		t.Fatalf("expected wing name Brawl, got %q", draft.Wings[0].Name)
+	}
+
+	if err := renameDraftItem(draft, "squad_0_1", "Logi 1"); err != nil {
+		t.Fatalf("expected squad rename to succeed, got %v", err)
+	}
+	if draft.Wings[0].Squads[1] != "Logi 1" {
+		t.Fatalf("expected squad name Logi 1, got %q", draft.Wings[0].Squads[1])
+	}
+
+	for _, tc := range []struct {
+		name    string
+		target  string
+		newName string
+	}{
+		{"wing over 10 chars", "wing_0", "12345678901"},
+		{"squad over 10 chars", "squad_0_0", "12345678901"},
+		{"empty name", "wing_0", "   "},
+		{"wing out of range", "wing_5", "Valid"},
+		{"squad out of range", "squad_0_5", "Valid"},
+		{"unknown target", "fleet_0", "Valid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := renameDraftItem(draft, tc.target, tc.newName); err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+		})
+	}
+}
+
+func TestBuildPanelComponents_UpdateButton(t *testing.T) {
+	setupFleetTestDB(t)
+
+	// Empty DB -> Update Template button exists and is disabled.
+	emptyComps, err := buildPanelComponents("g1")
+	if err != nil {
+		t.Fatalf("buildPanelComponents failed on empty db: %v", err)
+	}
+	btnRow := emptyComps[1].(discordgo.ActionsRow)
+	var foundEdit *discordgo.Button
+	for _, c := range btnRow.Components {
+		if b, ok := c.(discordgo.Button); ok && strings.HasPrefix(b.CustomID, "btn_edit_fleet_") {
+			bCopy := b
+			foundEdit = &bCopy
+		}
+	}
+	if foundEdit == nil || !foundEdit.Disabled || foundEdit.CustomID != "btn_edit_fleet_none" {
+		t.Fatalf("expected disabled btn_edit_fleet_none when no templates exist, got %+v", foundEdit)
+	}
+
+	// With saved template -> Update Template button is enabled and targets the template.
+	if err := SaveFleetTemplate("g1", FleetTemplate{
+		Name:  "pvp",
+		Wings: []WingTemplate{{Name: "Main", Squads: []string{"DPS"}}},
+	}); err != nil {
+		t.Fatalf("failed to save template: %v", err)
+	}
+
+	comps, err := buildPanelComponents("g1")
+	if err != nil {
+		t.Fatalf("buildPanelComponents failed: %v", err)
+	}
+	btnRow = comps[1].(discordgo.ActionsRow)
+	foundEdit = nil
+	for _, c := range btnRow.Components {
+		if b, ok := c.(discordgo.Button); ok && strings.HasPrefix(b.CustomID, "btn_edit_fleet_") {
+			bCopy := b
+			foundEdit = &bCopy
+		}
+	}
+	if foundEdit == nil || foundEdit.Disabled || foundEdit.CustomID != "btn_edit_fleet_pvp" {
+		t.Fatalf("expected enabled btn_edit_fleet_pvp, got %+v", foundEdit)
+	}
+}
+
+func TestUpdateTemplateRoundtrip(t *testing.T) {
+	setupFleetTestDB(t)
+
+	initial := FleetTemplate{
+		Name: "PVP",
+		Wings: []WingTemplate{
+			{Name: "Main", Squads: []string{"DPS", "OldSquad"}},
+		},
+	}
+	if err := SaveFleetTemplate("g1", initial); err != nil {
+		t.Fatalf("initial save failed: %v", err)
+	}
+
+	loaded, err := GetFleetTemplate("g1", "PVP")
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+
+	draft := cloneFleetTemplate(loaded)
+	// Rename wing & squad, remove one squad, add a new wing + squad
+	if err := renameDraftItem(draft, "wing_0", "Line"); err != nil {
+		t.Fatalf("rename wing failed: %v", err)
+	}
+	if err := renameDraftItem(draft, "squad_0_0", "HeavyDPS"); err != nil {
+		t.Fatalf("rename squad failed: %v", err)
+	}
+	draft.Wings[0].Squads = draft.Wings[0].Squads[:1] // remove OldSquad
+	draft.Wings = append(draft.Wings, WingTemplate{Name: "Support", Squads: []string{"Logi"}})
+
+	if err := SaveFleetTemplate("g1", *draft); err != nil {
+		t.Fatalf("updated save failed: %v", err)
+	}
+
+	updated, err := GetFleetTemplate("g1", "PVP")
+	if err != nil {
+		t.Fatalf("reload failed: %v", err)
+	}
+	if len(updated.Wings) != 2 ||
+		updated.Wings[0].Name != "Line" || len(updated.Wings[0].Squads) != 1 || updated.Wings[0].Squads[0] != "HeavyDPS" ||
+		updated.Wings[1].Name != "Support" || len(updated.Wings[1].Squads) != 1 || updated.Wings[1].Squads[0] != "Logi" {
+		t.Fatalf("unexpected updated template: %+v", updated)
 	}
 }
